@@ -1,11 +1,11 @@
-package pageflow
+package redifu
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lefalya/item"
+	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"math/rand"
@@ -179,6 +179,10 @@ func (cr *Base[T]) Set(item T, param ...string) error {
 		return setRedis.Err()
 	}
 
+	if param != nil {
+		cr.DelBlank(param...)
+	}
+
 	return nil
 }
 
@@ -193,6 +197,52 @@ func (cr *Base[T]) Del(item T) error {
 		return deleteRedis.Err()
 	}
 
+	return nil
+}
+
+func (cr *Base[T]) SetBlank(param ...string) error {
+	key := fmt.Sprintf(cr.itemKeyFormat, param)
+	key = key + ":blank"
+
+	setBlank := cr.client.Set(
+		context.TODO(),
+		key,
+		1,
+		SORTED_SET_TTL,
+	)
+
+	if setBlank.Err() != nil {
+		return setBlank.Err()
+	}
+	return nil
+}
+
+func (cr *Base[T]) IsBlank(param ...string) (bool, error) {
+	key := fmt.Sprintf(cr.itemKeyFormat, param)
+	key = key + ":blank"
+
+	getBlank := cr.client.Get(context.TODO(), key)
+	if getBlank.Err() != nil {
+		if getBlank.Err() == redis.Nil {
+			return false, nil
+		}
+		return false, getBlank.Err()
+	}
+
+	if getBlank.Val() == "1" {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (cr *Base[T]) DelBlank(param ...string) error {
+	key := fmt.Sprintf(cr.itemKeyFormat, param)
+	key = key + ":blank"
+
+	delBlank := cr.client.Del(context.TODO(), key)
+	if delBlank.Err() != nil {
+		return delBlank.Err()
+	}
 	return nil
 }
 
@@ -315,7 +365,7 @@ func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFo
 	}
 }
 
-type Paginate[T item.Blueprint] struct {
+type Timeline[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
 	sortedSetClient  *SortedSet[T]
@@ -324,19 +374,19 @@ type Paginate[T item.Blueprint] struct {
 	sortingReference string
 }
 
-func (cr *Paginate[T]) GetItemPerPage() int64 {
+func (cr *Timeline[T]) GetItemPerPage() int64 {
 	return cr.itemPerPage
 }
 
-func (cr *Paginate[T]) GetDirection() string {
+func (cr *Timeline[T]) GetDirection() string {
 	return cr.direction
 }
 
-func (cr *Paginate[T]) AddItem(item T, sortedSetParam []string) error {
+func (cr *Timeline[T]) AddItem(item T, sortedSetParam []string) error {
 	return cr.IngestItem(item, sortedSetParam, false)
 }
 
-func (cr *Paginate[T]) IngestItem(item T, sortedSetParam []string, seed bool) error {
+func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) error {
 	if cr.direction == "" {
 		return errors.New("must set direction!")
 	}
@@ -405,7 +455,7 @@ func (cr *Paginate[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 	return nil
 }
 
-func (cr *Paginate[T]) RemoveItem(item T, param []string) error {
+func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 	err := cr.sortedSetClient.DeleteFromSortedSet(param, item)
 	if err != nil {
 		return err
@@ -442,7 +492,7 @@ func (cr *Paginate[T]) RemoveItem(item T, param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) IsFirstPage(param []string) (bool, error) {
+func (cr *Timeline[T]) IsFirstPage(param []string) (bool, error) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	fistPageKey := sortedSetKey + ":firstpage"
 
@@ -461,7 +511,7 @@ func (cr *Paginate[T]) IsFirstPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Paginate[T]) SetFirstPage(param []string) error {
+func (cr *Timeline[T]) SetFirstPage(param []string) error {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	firstPageKey := sortedSetKey + ":firstpage"
 
@@ -478,7 +528,7 @@ func (cr *Paginate[T]) SetFirstPage(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) DelFirstPage(param []string) error {
+func (cr *Timeline[T]) DelFirstPage(param []string) error {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	firstPageKey := sortedSetKey + ":firstpage"
 
@@ -490,7 +540,7 @@ func (cr *Paginate[T]) DelFirstPage(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) IsLastPage(param []string) (bool, error) {
+func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":lastpage"
 
@@ -509,7 +559,7 @@ func (cr *Paginate[T]) IsLastPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Paginate[T]) SetLastPage(param []string) error {
+func (cr *Timeline[T]) SetLastPage(param []string) error {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":lastpage"
 
@@ -526,7 +576,7 @@ func (cr *Paginate[T]) SetLastPage(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) DelLastPage(param []string) error {
+func (cr *Timeline[T]) DelLastPage(param []string) error {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":lastpage"
 
@@ -537,7 +587,7 @@ func (cr *Paginate[T]) DelLastPage(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) IsBlankPage(param []string) (bool, error) {
+func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -556,7 +606,7 @@ func (cr *Paginate[T]) IsBlankPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Paginate[T]) SetBlankPage(param []string) error {
+func (cr *Timeline[T]) SetBlankPage(param []string) error {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -573,7 +623,7 @@ func (cr *Paginate[T]) SetBlankPage(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) DelBlankPage(param []string) error {
+func (cr *Timeline[T]) DelBlankPage(param []string) error {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -584,7 +634,7 @@ func (cr *Paginate[T]) DelBlankPage(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) Fetch(
+func (cr *Timeline[T]) Fetch(
 	param []string,
 	lastRandIds []string,
 	processorArgs []interface{},
@@ -661,11 +711,11 @@ func (cr *Paginate[T]) Fetch(
 	return items, validLastRandId, position, nil
 }
 
-func (cr *Paginate[T]) FetchAll(param []string) ([]T, error) {
+func (cr *Timeline[T]) FetchAll(param []string) ([]T, error) {
 	return FetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction)
 }
 
-func (cr *Paginate[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
+func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
 	isBlankPage, err := cr.IsBlankPage(param)
 	if err != nil {
 		return false, err
@@ -688,7 +738,7 @@ func (cr *Paginate[T]) RequriesSeeding(param []string, totalItems int64) (bool, 
 	}
 }
 
-func (cr *Paginate[T]) RemovePagination(param []string) error {
+func (cr *Timeline[T]) RemovePagination(param []string) error {
 	err := cr.sortedSetClient.DeleteSortedSet(param)
 	if err != nil {
 		return err
@@ -712,7 +762,7 @@ func (cr *Paginate[T]) RemovePagination(param []string) error {
 	return nil
 }
 
-func (cr *Paginate[T]) PurgePagination(param []string) error {
+func (cr *Timeline[T]) PurgePagination(param []string) error {
 	items, err := cr.FetchAll(param)
 	if err != nil {
 		return err
@@ -745,7 +795,7 @@ func (cr *Paginate[T]) PurgePagination(param []string) error {
 	return nil
 }
 
-func NewPaginateWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, sortingReference string) *Paginate[T] {
+func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, sortingReference string) *Timeline[T] {
 	if direction != Ascending && direction != Descending {
 		direction = Descending
 	}
@@ -755,7 +805,7 @@ func NewPaginateWithReference[T item.Blueprint](client redis.UniversalClient, ba
 		sortedSetKeyFormat: keyFormat,
 	}
 
-	return &Paginate[T]{
+	return &Timeline[T]{
 		client:           client,
 		baseClient:       baseClient,
 		sortedSetClient:  &sortedSetClient,
@@ -765,7 +815,7 @@ func NewPaginateWithReference[T item.Blueprint](client redis.UniversalClient, ba
 	}
 }
 
-func NewPaginate[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string) *Paginate[T] {
+func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string) *Timeline[T] {
 	if direction != Ascending && direction != Descending {
 		direction = Descending
 	}
@@ -775,7 +825,7 @@ func NewPaginate[T item.Blueprint](client redis.UniversalClient, baseClient *Bas
 		sortedSetKeyFormat: keyFormat,
 	}
 
-	return &Paginate[T]{
+	return &Timeline[T]{
 		client:          client,
 		baseClient:      baseClient,
 		sortedSetClient: &sortedSetClient,

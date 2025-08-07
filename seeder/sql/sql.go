@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/lefalya/pageflow"
+	"github.com/21strive/redifu"
 	"reflect"
 	"strconv"
 	"time"
@@ -17,18 +17,18 @@ var (
 	NilConfiguration             = errors.New("No configuration found!")
 )
 
-type RowScanner[T pageflow.SQLItemBlueprint] func(row *sql.Row) (T, error)
+type RowScanner[T redifu.SQLItemBlueprint] func(row *sql.Row) (T, error)
 
-type RowsScanner[T pageflow.SQLItemBlueprint] func(rows *sql.Rows) (T, error)
+type RowsScanner[T redifu.SQLItemBlueprint] func(rows *sql.Rows) (T, error)
 
-type PaginateSQLSeeder[T pageflow.SQLItemBlueprint] struct {
+type TimelineSQLSeeder[T redifu.SQLItemBlueprint] struct {
 	db               *sql.DB
-	baseClient       *pageflow.Base[T]
-	paginationClient *pageflow.Paginate[T]
+	baseClient       *redifu.Base[T]
+	paginationClient *redifu.Timeline[T]
 	scoringField     string
 }
 
-func (s *PaginateSQLSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) (T, error) {
+func (s *TimelineSQLSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) (T, error) {
 	var item T
 	if s.db == nil {
 		return item, NoDatabaseProvided
@@ -51,7 +51,7 @@ func (s *PaginateSQLSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T]
 	return item, nil
 }
 
-func (s *PaginateSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) error {
+func (s *TimelineSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) error {
 	item, err := s.FindOne(rowQuery, rowScanner, queryArgs)
 	if err != nil {
 		return err
@@ -60,7 +60,7 @@ func (s *PaginateSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T]
 	return s.baseClient.Set(item)
 }
 
-func (s *PaginateSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
+func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -123,18 +123,18 @@ func (s *PaginateSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery strin
 	return nil
 }
 
-func NewPaginateSQLSeeder[T pageflow.SQLItemBlueprint](db *sql.DB, baseClient *pageflow.Base[T], paginateClient *pageflow.Paginate[T]) *PaginateSQLSeeder[T] {
-	return &PaginateSQLSeeder[T]{
+func NewPaginateSQLSeeder[T redifu.SQLItemBlueprint](db *sql.DB, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T]) *TimelineSQLSeeder[T] {
+	return &TimelineSQLSeeder[T]{
 		db:               db,
 		baseClient:       baseClient,
 		paginationClient: paginateClient,
 	}
 }
 
-type SortedSQLSeeder[T pageflow.SQLItemBlueprint] struct {
+type SortedSQLSeeder[T redifu.SQLItemBlueprint] struct {
 	db           *sql.DB
-	baseClient   *pageflow.Base[T]
-	sortedClient *pageflow.Sorted[T]
+	baseClient   *redifu.Base[T]
+	sortedClient *redifu.Sorted[T]
 	scoringField string
 }
 
@@ -177,10 +177,10 @@ func (s *SortedSQLSeeder[T]) SeedAll(
 	return nil
 }
 
-func NewSortedSQLSeeder[T pageflow.SQLItemBlueprint](
+func NewSortedSQLSeeder[T redifu.SQLItemBlueprint](
 	db *sql.DB,
-	baseClient *pageflow.Base[T],
-	sortedClient *pageflow.Sorted[T],
+	baseClient *redifu.Base[T],
+	sortedClient *redifu.Sorted[T],
 ) *SortedSQLSeeder[T] {
 	return &SortedSQLSeeder[T]{
 		db:           db,

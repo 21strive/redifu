@@ -1,4 +1,4 @@
-package pageflow
+package redifu
 
 import "testing"
 
@@ -13,6 +13,6 @@ func TestSetFirstPage(t *testing.T) {
 		car string `json:"car" bson:"car"`
 	}
 	key := "voucher"
-	paginate := NewPaginate[Car](nil, nil, key, 10, Descending)
+	paginate := NewTimeline[Car](nil, nil, key, 10, Descending)
 	paginate.SetFirstPage(nil)
 }

@@ -3,7 +3,7 @@ package mongo
 import (
 	"context"
 	"errors"
-	"github.com/lefalya/pageflow"
+	"github.com/21strive/redifu"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -16,14 +16,14 @@ var (
 	DocumentOrReferencesNotFound = errors.New("Document or References not found!")
 )
 
-type PaginateMongoSeeder[T pageflow.MongoItemBlueprint] struct {
+type TimelineMongoSeeder[T redifu.MongoItemBlueprint] struct {
 	coll             *mongo.Collection
-	baseClient       *pageflow.Base[T]
-	paginationClient *pageflow.Paginate[T]
+	baseClient       *redifu.Base[T]
+	paginationClient *redifu.Timeline[T]
 	scoringField     string
 }
 
-func (m *PaginateMongoSeeder[T]) FindOne(key string, value string, initItem func() T) (T, error) {
+func (m *TimelineMongoSeeder[T]) FindOne(key string, value string, initItem func() T) (T, error) {
 	mongoItem := initItem()
 	if m.coll == nil {
 		return mongoItem, NoDatabaseProvided
@@ -41,7 +41,7 @@ func (m *PaginateMongoSeeder[T]) FindOne(key string, value string, initItem func
 	return mongoItem, nil
 }
 
-func (m *PaginateMongoSeeder[T]) SeedOne(key string, value string, initItem func() T) error {
+func (m *TimelineMongoSeeder[T]) SeedOne(key string, value string, initItem func() T) error {
 	item, err := m.FindOne(key, value, initItem)
 	if err != nil {
 		return err
@@ -50,7 +50,7 @@ func (m *PaginateMongoSeeder[T]) SeedOne(key string, value string, initItem func
 	return m.baseClient.Set(item)
 }
 
-func (m *PaginateMongoSeeder[T]) SeedPartial(subtraction int64, validLastRandId string, query bson.D, paginateParams []string, initItem func() T) error {
+func (m *TimelineMongoSeeder[T]) SeedPartial(subtraction int64, validLastRandId string, query bson.D, paginateParams []string, initItem func() T) error {
 	var cursor *mongo.Cursor
 	var reference T
 	var withReference bool
@@ -73,7 +73,7 @@ func (m *PaginateMongoSeeder[T]) SeedPartial(subtraction int64, validLastRandId 
 	}
 
 	findOptions := options.Find()
-	if m.paginationClient.GetDirection() == pageflow.Ascending {
+	if m.paginationClient.GetDirection() == redifu.Ascending {
 		findOptions.SetSort(bson.D{{sortField, 1}})
 		compOp = "$gt"
 	} else {
@@ -159,7 +159,7 @@ func (m *PaginateMongoSeeder[T]) SeedPartial(subtraction int64, validLastRandId 
 	return nil
 }
 
-func (m *PaginateMongoSeeder[T]) SeedAll(query bson.D, listParam []string, initItem func() T) error {
+func (m *TimelineMongoSeeder[T]) SeedAll(query bson.D, listParam []string, initItem func() T) error {
 	cursor, err := m.coll.Find(context.TODO(), query)
 	if err != nil {
 		return err
@@ -180,8 +180,8 @@ func (m *PaginateMongoSeeder[T]) SeedAll(query bson.D, listParam []string, initI
 	return nil
 }
 
-func NewPaginateMongoSeederWithReference[T pageflow.MongoItemBlueprint](coll *mongo.Collection, baseClient *pageflow.Base[T], paginateClient *pageflow.Paginate[T], sortingReference string) *PaginateMongoSeeder[T] {
-	return &PaginateMongoSeeder[T]{
+func NewPaginateMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T], sortingReference string) *TimelineMongoSeeder[T] {
+	return &TimelineMongoSeeder[T]{
 		coll:             coll,
 		baseClient:       baseClient,
 		paginationClient: paginateClient,
@@ -189,18 +189,18 @@ func NewPaginateMongoSeederWithReference[T pageflow.MongoItemBlueprint](coll *mo
 	}
 }
 
-func NewPaginateMongoSeeder[T pageflow.MongoItemBlueprint](coll *mongo.Collection, baseClient *pageflow.Base[T], paginateClient *pageflow.Paginate[T]) *PaginateMongoSeeder[T] {
-	return &PaginateMongoSeeder[T]{
+func NewPaginateMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T]) *TimelineMongoSeeder[T] {
+	return &TimelineMongoSeeder[T]{
 		coll:             coll,
 		baseClient:       baseClient,
 		paginationClient: paginateClient,
 	}
 }
 
-type SortedMongoSeeder[T pageflow.MongoItemBlueprint] struct {
+type SortedMongoSeeder[T redifu.MongoItemBlueprint] struct {
 	coll         *mongo.Collection
-	baseClient   *pageflow.Base[T]
-	sortedClient *pageflow.Sorted[T]
+	baseClient   *redifu.Base[T]
+	sortedClient *redifu.Sorted[T]
 	scoringField string
 }
 
@@ -253,7 +253,7 @@ func getFieldValue(obj interface{}, fieldName string) interface{} {
 	return field.Interface()
 }
 
-func NewSortedMongoSeederWithReference[T pageflow.MongoItemBlueprint](coll *mongo.Collection, baseClient *pageflow.Base[T], sortedClient *pageflow.Sorted[T], sortingReference string) *SortedMongoSeeder[T] {
+func NewSortedMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], sortedClient *redifu.Sorted[T], sortingReference string) *SortedMongoSeeder[T] {
 	return &SortedMongoSeeder[T]{
 		coll:         coll,
 		baseClient:   baseClient,
@@ -262,7 +262,7 @@ func NewSortedMongoSeederWithReference[T pageflow.MongoItemBlueprint](coll *mong
 	}
 }
 
-func NewSortedMongoSeeder[T pageflow.MongoItemBlueprint](coll *mongo.Collection, baseClient *pageflow.Base[T], sortedClient *pageflow.Sorted[T]) *SortedMongoSeeder[T] {
+func NewSortedMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], sortedClient *redifu.Sorted[T]) *SortedMongoSeeder[T] {
 	return &SortedMongoSeeder[T]{
 		coll:         coll,
 		baseClient:   baseClient,

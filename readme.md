@@ -1,6 +1,6 @@
-# Pageflow
+# Redifu
 
-Pageflow is a Go library for efficient Redis-backed pagination and sorting using Redis Sorted Sets. It provides a clean abstraction for handling paginated data with customizable page sizes and sorting directions, with MongoDB support.
+Redifu is a Go library for efficient Redis-backed pagination and sorting using Redis Sorted Sets. It provides a clean abstraction for handling paginated data with customizable page sizes and sorting directions, with MongoDB support.
 
 ## Features
 
