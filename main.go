@@ -406,8 +406,6 @@ func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 		return err
 	}
 
-	currentItemScore := float64(item.GetCreatedAt().UnixMilli())
-
 	if !seed {
 		isBlankPage, errGet := cr.IsBlankPage(sortedSetParam)
 		if errGet != nil {
@@ -424,7 +422,7 @@ func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 					return err
 				}
 
-				if currentItemScore >= lowestScore {
+				if score >= lowestScore {
 					if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) == cr.itemPerPage && isFirstPage {
 						cr.DelFirstPage(sortedSetParam)
 					}
@@ -438,7 +436,7 @@ func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 					return err
 				}
 
-				if currentItemScore <= highestScore {
+				if score <= highestScore {
 					if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) == cr.itemPerPage && isFirstPage {
 						return cr.DelFirstPage(sortedSetParam)
 					}
