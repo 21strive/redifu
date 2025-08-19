@@ -3,7 +3,7 @@ module github.com/21strive/redifu
 go 1.22
 
 require (
-	github.com/21strive/item v0.1.1
+	github.com/21strive/item v0.2.0
 	github.com/redis/go-redis/v9 v9.7.0
 	go.mongodb.org/mongo-driver v1.17.3
 )

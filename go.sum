@@ -1,5 +1,7 @@
 github.com/21strive/item v0.1.1 h1:I2jJsc7sMefHnjPgXMcExdnYM8e6nJabfScve5bF53k=
 github.com/21strive/item v0.1.1/go.mod h1:9RdLvyrTqdzWC6qba1iod/2Knx1WlJItfVWtHHnC6iA=
+github.com/21strive/item v0.2.0 h1:aJI5P8g0+NqxCqq05d7qKXw1Q5nqtBNpKbYoBXRAPrs=
+github.com/21strive/item v0.2.0/go.mod h1:9RdLvyrTqdzWC6qba1iod/2Knx1WlJItfVWtHHnC6iA=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
 github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
 github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=
