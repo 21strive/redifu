@@ -152,10 +152,9 @@ func (cr *Base[T]) Get(param string) (T, error) {
 }
 
 func (cr *Base[T]) Set(item T, param ...string) error {
-	if len(param) > 0 {
+	if len(param) > 1 {
 		return errors.New("only accept one param")
 	}
-
 	var key string
 	if param != nil {
 		key = fmt.Sprintf(cr.itemKeyFormat, param[0])
@@ -186,8 +185,16 @@ func (cr *Base[T]) Set(item T, param ...string) error {
 	return nil
 }
 
-func (cr *Base[T]) Del(item T) error {
-	key := fmt.Sprintf(cr.itemKeyFormat, item.GetRandId())
+func (cr *Base[T]) Del(item T, param ...string) error {
+	if len(param) > 1 {
+		return errors.New("only accept one param")
+	}
+	var key string
+	if param != nil {
+		key = fmt.Sprintf(cr.itemKeyFormat, param[0])
+	} else {
+		key = fmt.Sprintf(cr.itemKeyFormat, item.GetRandId())
+	}
 
 	deleteRedis := cr.client.Del(
 		context.TODO(),
