@@ -8,38 +8,17 @@ import (
 	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"math/rand"
 	"reflect"
 	"time"
 )
 
 const (
-	FORMATTED_TIME     = "2006-01-02T15:04:05.000000000Z"
-	DAY                = 24 * time.Hour
-	INDIVIDUAL_KEY_TTL = DAY * 7
-	SORTED_SET_TTL     = DAY * 2
-	RANDID_LENGTH      = 16
-	firstPage          = "FIRST_PAGE"
-	middlePage         = "MIDDLE_PAGE"
-	lastPage           = "LAST_PAGE"
-	Ascending          = "Ascending"
-	Descending         = "Descending"
+	firstPage  = "FIRST_PAGE"
+	middlePage = "MIDDLE_PAGE"
+	lastPage   = "LAST_PAGE"
+	Ascending  = "Ascending"
+	Descending = "Descending"
 )
-
-func RandId() string {
-	// Define the characters that can be used in the random string
-	characters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-	// Initialize an empty string to store the result
-	result := make([]byte, RANDID_LENGTH)
-
-	// Generate random characters for the string
-	for i := 0; i < RANDID_LENGTH; i++ {
-		result[i] = characters[rand.Intn(len(characters))]
-	}
-
-	return string(result)
-}
 
 func joinParam(keyFormat string, param []string) string {
 	interfaces := make([]interface{}, len(param))
@@ -123,6 +102,7 @@ func InitSQLItem[T SQLItemBlueprint](sqlItem T) {
 type Base[T item.Blueprint] struct {
 	client        redis.UniversalClient
 	itemKeyFormat string
+	timeToLive    time.Duration
 }
 
 func (cr *Base[T]) Get(param string) (T, error) {
@@ -143,7 +123,7 @@ func (cr *Base[T]) Get(param string) (T, error) {
 		return nilItem, errorUnmarshal
 	}
 
-	setExpire := cr.client.Expire(context.TODO(), key, INDIVIDUAL_KEY_TTL)
+	setExpire := cr.client.Expire(context.TODO(), key, cr.timeToLive)
 	if setExpire.Err() != nil {
 		return nilItem, setExpire.Err()
 	}
@@ -172,7 +152,7 @@ func (cr *Base[T]) Set(item T, param ...string) error {
 		context.TODO(),
 		key,
 		valueAsString,
-		INDIVIDUAL_KEY_TTL,
+		cr.timeToLive,
 	)
 	if setRedis.Err() != nil {
 		return setRedis.Err()
@@ -215,7 +195,7 @@ func (cr *Base[T]) SetBlank(param ...string) error {
 		context.TODO(),
 		key,
 		1,
-		SORTED_SET_TTL,
+		cr.timeToLive,
 	)
 
 	if setBlank.Err() != nil {
@@ -253,16 +233,18 @@ func (cr *Base[T]) DelBlank(param ...string) error {
 	return nil
 }
 
-func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string) *Base[T] {
+func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *Base[T] {
 	return &Base[T]{
 		client:        client,
 		itemKeyFormat: itemKeyFormat,
+		timeToLive:    timeToLive,
 	}
 }
 
 type SortedSet[T item.Blueprint] struct {
 	client             redis.UniversalClient
 	sortedSetKeyFormat string
+	timeToLive         time.Duration
 }
 
 func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) error {
@@ -289,7 +271,7 @@ func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) erro
 	setExpire := cr.client.Expire(
 		context.TODO(),
 		key,
-		SORTED_SET_TTL,
+		cr.timeToLive,
 	)
 	if !setExpire.Val() {
 		return setExpire.Err()
@@ -365,10 +347,11 @@ func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
 	return result[0].Score, nil
 }
 
-func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string) *SortedSet[T] {
+func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) *SortedSet[T] {
 	return &SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: sortedSetKeyFormat,
+		timeToLive:         timeToLive,
 	}
 }
 
@@ -524,7 +507,7 @@ func (cr *Timeline[T]) SetFirstPage(param []string) error {
 		context.TODO(),
 		firstPageKey,
 		1,
-		SORTED_SET_TTL,
+		cr.baseClient.timeToLive,
 	)
 
 	if setFirstPageKey.Err() != nil {
@@ -572,7 +555,7 @@ func (cr *Timeline[T]) SetLastPage(param []string) error {
 		context.TODO(),
 		lastPageKey,
 		1,
-		SORTED_SET_TTL,
+		cr.baseClient.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
@@ -619,7 +602,7 @@ func (cr *Timeline[T]) SetBlankPage(param []string) error {
 		context.TODO(),
 		lastPageKey,
 		1,
-		SORTED_SET_TTL,
+		cr.baseClient.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
@@ -691,7 +674,7 @@ func (cr *Timeline[T]) Fetch(
 	}
 	listRandIds = result.Val()
 
-	cr.client.Expire(context.TODO(), sortedSetKey, SORTED_SET_TTL)
+	cr.client.Expire(context.TODO(), sortedSetKey, cr.sortedSetClient.timeToLive)
 
 	for i := 0; i < len(listRandIds); i++ {
 		item, err := cr.baseClient.Get(listRandIds[i])
@@ -717,7 +700,7 @@ func (cr *Timeline[T]) Fetch(
 }
 
 func (cr *Timeline[T]) FetchAll(param []string) ([]T, error) {
-	return FetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction)
+	return FetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive)
 }
 
 func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
@@ -800,7 +783,7 @@ func (cr *Timeline[T]) PurgePagination(param []string) error {
 	return nil
 }
 
-func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, sortingReference string) *Timeline[T] {
+func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, sortingReference string, timeToLive time.Duration) *Timeline[T] {
 	if direction != Ascending && direction != Descending {
 		direction = Descending
 	}
@@ -808,6 +791,7 @@ func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, ba
 	sortedSetClient := SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: keyFormat,
+		timeToLive:         timeToLive,
 	}
 
 	return &Timeline[T]{
@@ -820,7 +804,7 @@ func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, ba
 	}
 }
 
-func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string) *Timeline[T] {
+func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) *Timeline[T] {
 	if direction != Ascending && direction != Descending {
 		direction = Descending
 	}
@@ -828,6 +812,7 @@ func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Bas
 	sortedSetClient := SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: keyFormat,
+		timeToLive:         timeToLive,
 	}
 
 	return &Timeline[T]{
@@ -967,7 +952,7 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 }
 
 func (srtd *Sorted[T]) Fetch(param []string) ([]T, error) {
-	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, srtd.direction)
+	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, srtd.direction, srtd.baseClient.timeToLive)
 }
 
 func (srtd *Sorted[T]) SetBlankPage(param []string) error {
@@ -978,7 +963,7 @@ func (srtd *Sorted[T]) SetBlankPage(param []string) error {
 		context.TODO(),
 		lastPageKey,
 		1,
-		SORTED_SET_TTL,
+		srtd.baseClient.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
@@ -1060,10 +1045,11 @@ func (srtd *Sorted[T]) PurgeSorted(param []string) error {
 	return nil
 }
 
-func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, direction string, sortingReference string) *Sorted[T] {
+func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, direction string, sortingReference string, timeToLive time.Duration) *Sorted[T] {
 	sortedSetClient := &SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: keyFormat,
+		timeToLive:         timeToLive,
 	}
 
 	return &Sorted[T]{
@@ -1075,10 +1061,11 @@ func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, base
 	}
 }
 
-func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, direction string) *Sorted[T] {
+func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, direction string, timeToLive time.Duration) *Sorted[T] {
 	sortedSetClient := &SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: keyFormat,
+		timeToLive:         timeToLive,
 	}
 
 	return &Sorted[T]{
@@ -1089,7 +1076,7 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[
 	}
 }
 
-func FetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], param []string, direction string) ([]T, error) {
+func FetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], param []string, direction string, timeToLive time.Duration) ([]T, error) {
 	var items []T
 	var extendTTL bool
 
@@ -1124,7 +1111,7 @@ func FetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *B
 	}
 
 	if extendTTL {
-		redisClient.Expire(context.TODO(), sortedSetKey, SORTED_SET_TTL)
+		redisClient.Expire(context.TODO(), sortedSetKey, timeToLive)
 	}
 
 	return items, nil
