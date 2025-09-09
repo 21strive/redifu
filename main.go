@@ -625,8 +625,8 @@ func (cr *Timeline[T]) DelBlankPage(param []string) error {
 func (cr *Timeline[T]) Fetch(
 	param []string,
 	lastRandIds []string,
-	processorArgs []interface{},
 	processor func(item *T, args []interface{}),
+	processorArgs []interface{},
 ) ([]T, string, string, error) {
 	var items []T
 	var validLastRandId string
@@ -699,8 +699,8 @@ func (cr *Timeline[T]) Fetch(
 	return items, validLastRandId, position, nil
 }
 
-func (cr *Timeline[T]) FetchAll(param []string) ([]T, error) {
-	return FetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive)
+func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
+	return FetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs)
 }
 
 func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
@@ -751,7 +751,7 @@ func (cr *Timeline[T]) RemovePagination(param []string) error {
 }
 
 func (cr *Timeline[T]) PurgePagination(param []string) error {
-	items, err := cr.FetchAll(param)
+	items, err := cr.FetchAll(param, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -951,8 +951,8 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 	return srtd.sortedSetClient.DeleteFromSortedSet(sortedSetParam, item)
 }
 
-func (srtd *Sorted[T]) Fetch(param []string) ([]T, error) {
-	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, srtd.direction, srtd.baseClient.timeToLive)
+func (srtd *Sorted[T]) Fetch(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
+	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, srtd.direction, srtd.baseClient.timeToLive, processor, processorArgs)
 }
 
 func (srtd *Sorted[T]) SetBlankPage(param []string) error {
@@ -1028,7 +1028,7 @@ func (srtd *Sorted[T]) RemoveSorted(param []string) error {
 }
 
 func (srtd *Sorted[T]) PurgeSorted(param []string) error {
-	items, err := srtd.Fetch(param)
+	items, err := srtd.Fetch(param, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1076,7 +1076,7 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[
 	}
 }
 
-func FetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], param []string, direction string, timeToLive time.Duration) ([]T, error) {
+func FetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], param []string, direction string, timeToLive time.Duration, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
 	var items []T
 	var extendTTL bool
 
@@ -1107,6 +1107,11 @@ func FetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *B
 		if err != nil {
 			continue
 		}
+
+		if processor != nil {
+			processor(&item, processorArgs)
+		}
+
 		items = append(items, item)
 	}
 
