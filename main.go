@@ -16,8 +16,8 @@ const (
 	firstPage  = "FIRST_PAGE"
 	middlePage = "MIDDLE_PAGE"
 	lastPage   = "LAST_PAGE"
-	Ascending  = "Ascending"
-	Descending = "Descending"
+	Ascending  = "asc"
+	Descending = "desc"
 )
 
 func joinParam(keyFormat string, param []string) string {
@@ -906,16 +906,7 @@ type Sorted[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
 	sortedSetClient  *SortedSet[T]
-	direction        string
 	sortingReference string
-}
-
-func (srtd *Sorted[T]) SetDirection(direction string) {
-	if direction != Ascending && direction != Descending {
-		direction = Descending
-	} else {
-		srtd.direction = direction
-	}
 }
 
 func (srtd *Sorted[T]) AddItem(item T, sortedSetParam []string) {
@@ -951,8 +942,8 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 	return srtd.sortedSetClient.DeleteFromSortedSet(sortedSetParam, item)
 }
 
-func (srtd *Sorted[T]) Fetch(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, srtd.direction, srtd.baseClient.timeToLive, processor, processorArgs)
+func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
+	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, srtd.baseClient.timeToLive, processor, processorArgs)
 }
 
 func (srtd *Sorted[T]) SetBlankPage(param []string) error {
@@ -1028,7 +1019,7 @@ func (srtd *Sorted[T]) RemoveSorted(param []string) error {
 }
 
 func (srtd *Sorted[T]) PurgeSorted(param []string) error {
-	items, err := srtd.Fetch(param, nil, nil)
+	items, err := srtd.Fetch(param, Descending, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1045,7 +1036,7 @@ func (srtd *Sorted[T]) PurgeSorted(param []string) error {
 	return nil
 }
 
-func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, direction string, sortingReference string, timeToLive time.Duration) *Sorted[T] {
+func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, sortingReference string, timeToLive time.Duration) *Sorted[T] {
 	sortedSetClient := &SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: keyFormat,
@@ -1056,12 +1047,11 @@ func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, base
 		client:           client,
 		baseClient:       baseClient,
 		sortedSetClient:  sortedSetClient,
-		direction:        direction,
 		sortingReference: sortingReference,
 	}
 }
 
-func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, direction string, timeToLive time.Duration) *Sorted[T] {
+func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) *Sorted[T] {
 	sortedSetClient := &SortedSet[T]{
 		client:             client,
 		sortedSetKeyFormat: keyFormat,
@@ -1072,7 +1062,6 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[
 		client:          client,
 		baseClient:      baseClient,
 		sortedSetClient: sortedSetClient,
-		direction:       direction,
 	}
 }
 
