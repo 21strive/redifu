@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/21strive/redifu"
+	"github.com/21strive/redifu/types"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -18,8 +19,8 @@ var (
 
 type TimelineMongoSeeder[T redifu.MongoItemBlueprint] struct {
 	coll             *mongo.Collection
-	baseClient       *redifu.Base[T]
-	paginationClient *redifu.Timeline[T]
+	baseClient       *types.Base[T]
+	paginationClient *types.Timeline[T]
 	scoringField     string
 }
 
@@ -180,7 +181,7 @@ func (m *TimelineMongoSeeder[T]) SeedAll(query bson.D, listParam []string, initI
 	return nil
 }
 
-func NewPaginateMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T], sortingReference string) *TimelineMongoSeeder[T] {
+func NewPaginateMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], paginateClient *types.Timeline[T], sortingReference string) *TimelineMongoSeeder[T] {
 	return &TimelineMongoSeeder[T]{
 		coll:             coll,
 		baseClient:       baseClient,
@@ -189,7 +190,7 @@ func NewPaginateMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mong
 	}
 }
 
-func NewPaginateMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T]) *TimelineMongoSeeder[T] {
+func NewPaginateMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], paginateClient *types.Timeline[T]) *TimelineMongoSeeder[T] {
 	return &TimelineMongoSeeder[T]{
 		coll:             coll,
 		baseClient:       baseClient,
@@ -199,8 +200,8 @@ func NewPaginateMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection,
 
 type SortedMongoSeeder[T redifu.MongoItemBlueprint] struct {
 	coll         *mongo.Collection
-	baseClient   *redifu.Base[T]
-	sortedClient *redifu.Sorted[T]
+	baseClient   *types.Base[T]
+	sortedClient *types.Sorted[T]
 	scoringField string
 }
 
@@ -253,7 +254,7 @@ func getFieldValue(obj interface{}, fieldName string) interface{} {
 	return field.Interface()
 }
 
-func NewSortedMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], sortedClient *redifu.Sorted[T], sortingReference string) *SortedMongoSeeder[T] {
+func NewSortedMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], sortedClient *types.Sorted[T], sortingReference string) *SortedMongoSeeder[T] {
 	return &SortedMongoSeeder[T]{
 		coll:         coll,
 		baseClient:   baseClient,
@@ -262,7 +263,7 @@ func NewSortedMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.
 	}
 }
 
-func NewSortedMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *redifu.Base[T], sortedClient *redifu.Sorted[T]) *SortedMongoSeeder[T] {
+func NewSortedMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], sortedClient *types.Sorted[T]) *SortedMongoSeeder[T] {
 	return &SortedMongoSeeder[T]{
 		coll:         coll,
 		baseClient:   baseClient,

@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/21strive/redifu"
+	"github.com/21strive/redifu/types"
 	"reflect"
 	"strconv"
 	"time"
@@ -17,14 +17,14 @@ var (
 	NilConfiguration             = errors.New("No configuration found!")
 )
 
-type RowScanner[T redifu.SQLItemBlueprint] func(row *sql.Row) (T, error)
+type RowScanner[T types.SQLItemBlueprint] func(row *sql.Row) (T, error)
 
-type RowsScanner[T redifu.SQLItemBlueprint] func(rows *sql.Rows) (T, error)
+type RowsScanner[T types.SQLItemBlueprint] func(rows *sql.Rows) (T, error)
 
-type TimelineSQLSeeder[T redifu.SQLItemBlueprint] struct {
+type TimelineSQLSeeder[T types.SQLItemBlueprint] struct {
 	db               *sql.DB
-	baseClient       *redifu.Base[T]
-	paginationClient *redifu.Timeline[T]
+	baseClient       *types.Base[T]
+	paginationClient *types.Timeline[T]
 	scoringField     string
 }
 
@@ -123,7 +123,7 @@ func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery strin
 	return nil
 }
 
-func NewPaginateSQLSeeder[T redifu.SQLItemBlueprint](db *sql.DB, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T]) *TimelineSQLSeeder[T] {
+func NewTimelineSQLSeeder[T types.SQLItemBlueprint](db *sql.DB, baseClient *types.Base[T], paginateClient *types.Timeline[T]) *TimelineSQLSeeder[T] {
 	return &TimelineSQLSeeder[T]{
 		db:               db,
 		baseClient:       baseClient,
@@ -131,10 +131,10 @@ func NewPaginateSQLSeeder[T redifu.SQLItemBlueprint](db *sql.DB, baseClient *red
 	}
 }
 
-type SortedSQLSeeder[T redifu.SQLItemBlueprint] struct {
+type SortedSQLSeeder[T types.SQLItemBlueprint] struct {
 	db           *sql.DB
-	baseClient   *redifu.Base[T]
-	sortedClient *redifu.Sorted[T]
+	baseClient   *types.Base[T]
+	sortedClient *types.Sorted[T]
 	scoringField string
 }
 
@@ -177,10 +177,10 @@ func (s *SortedSQLSeeder[T]) SeedAll(
 	return nil
 }
 
-func NewSortedSQLSeeder[T redifu.SQLItemBlueprint](
+func NewSortedSQLSeeder[T types.SQLItemBlueprint](
 	db *sql.DB,
-	baseClient *redifu.Base[T],
-	sortedClient *redifu.Sorted[T],
+	baseClient *types.Base[T],
+	sortedClient *types.Sorted[T],
 ) *SortedSQLSeeder[T] {
 	return &SortedSQLSeeder[T]{
 		db:           db,
