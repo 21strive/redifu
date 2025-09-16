@@ -3,13 +3,14 @@ package mongo
 import (
 	"context"
 	"errors"
-	"github.com/21strive/redifu"
+	"reflect"
+	"time"
+
+	"github.com/21strive/redifu/definition"
 	"github.com/21strive/redifu/types"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"reflect"
-	"time"
 )
 
 var (
@@ -17,7 +18,7 @@ var (
 	DocumentOrReferencesNotFound = errors.New("Document or References not found!")
 )
 
-type TimelineMongoSeeder[T redifu.MongoItemBlueprint] struct {
+type TimelineMongoSeeder[T types.MongoItemBlueprint] struct {
 	coll             *mongo.Collection
 	baseClient       *types.Base[T]
 	paginationClient *types.Timeline[T]
@@ -74,7 +75,7 @@ func (m *TimelineMongoSeeder[T]) SeedPartial(subtraction int64, validLastRandId 
 	}
 
 	findOptions := options.Find()
-	if m.paginationClient.GetDirection() == redifu.Ascending {
+	if m.paginationClient.GetDirection() == definition.Ascending {
 		findOptions.SetSort(bson.D{{sortField, 1}})
 		compOp = "$gt"
 	} else {
@@ -181,7 +182,7 @@ func (m *TimelineMongoSeeder[T]) SeedAll(query bson.D, listParam []string, initI
 	return nil
 }
 
-func NewPaginateMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], paginateClient *types.Timeline[T], sortingReference string) *TimelineMongoSeeder[T] {
+func NewPaginateMongoSeederWithReference[T types.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], paginateClient *types.Timeline[T], sortingReference string) *TimelineMongoSeeder[T] {
 	return &TimelineMongoSeeder[T]{
 		coll:             coll,
 		baseClient:       baseClient,
@@ -190,7 +191,7 @@ func NewPaginateMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mong
 	}
 }
 
-func NewPaginateMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], paginateClient *types.Timeline[T]) *TimelineMongoSeeder[T] {
+func NewPaginateMongoSeeder[T types.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], paginateClient *types.Timeline[T]) *TimelineMongoSeeder[T] {
 	return &TimelineMongoSeeder[T]{
 		coll:             coll,
 		baseClient:       baseClient,
@@ -198,7 +199,7 @@ func NewPaginateMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection,
 	}
 }
 
-type SortedMongoSeeder[T redifu.MongoItemBlueprint] struct {
+type SortedMongoSeeder[T types.MongoItemBlueprint] struct {
 	coll         *mongo.Collection
 	baseClient   *types.Base[T]
 	sortedClient *types.Sorted[T]
@@ -254,7 +255,7 @@ func getFieldValue(obj interface{}, fieldName string) interface{} {
 	return field.Interface()
 }
 
-func NewSortedMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], sortedClient *types.Sorted[T], sortingReference string) *SortedMongoSeeder[T] {
+func NewSortedMongoSeederWithReference[T types.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], sortedClient *types.Sorted[T], sortingReference string) *SortedMongoSeeder[T] {
 	return &SortedMongoSeeder[T]{
 		coll:         coll,
 		baseClient:   baseClient,
@@ -263,7 +264,7 @@ func NewSortedMongoSeederWithReference[T redifu.MongoItemBlueprint](coll *mongo.
 	}
 }
 
-func NewSortedMongoSeeder[T redifu.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], sortedClient *types.Sorted[T]) *SortedMongoSeeder[T] {
+func NewSortedMongoSeeder[T types.MongoItemBlueprint](coll *mongo.Collection, baseClient *types.Base[T], sortedClient *types.Sorted[T]) *SortedMongoSeeder[T] {
 	return &SortedMongoSeeder[T]{
 		coll:         coll,
 		baseClient:   baseClient,

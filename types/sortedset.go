@@ -3,16 +3,23 @@ package types
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/21strive/item"
 	"github.com/21strive/redifu/helper"
 	"github.com/redis/go-redis/v9"
-	"time"
 )
 
 type SortedSet[T item.Blueprint] struct {
 	client             redis.UniversalClient
 	sortedSetKeyFormat string
 	timeToLive         time.Duration
+}
+
+func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) {
+	cr.client = client
+	cr.sortedSetKeyFormat = sortedSetKeyFormat
+	cr.timeToLive = timeToLive
 }
 
 func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) error {
@@ -101,7 +108,7 @@ func (cr *SortedSet[T]) LowestScore(param []string) (float64, error) {
 }
 
 func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
-	key := helper.joinParam(cr.sortedSetKeyFormat, param)
+	key := helper.JoinParam(cr.sortedSetKeyFormat, param)
 
 	result, err := cr.client.ZRangeWithScores(context.TODO(), key, -1, -1).Result()
 	if err != nil {

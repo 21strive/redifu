@@ -3,8 +3,10 @@ package types
 import (
 	"context"
 	"errors"
+
 	"github.com/21strive/item"
-	"github.com/21strive/redifu"
+	"github.com/21strive/redifu/definition"
+	"github.com/21strive/redifu/helper"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -15,6 +17,18 @@ type Timeline[T item.Blueprint] struct {
 	itemPerPage      int64
 	direction        string
 	sortingReference string
+}
+
+func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], itemPerPage int64, direction string) {
+	cr.client = client
+	cr.baseClient = baseClient
+	cr.sortedSetClient = sortedSetClient
+	cr.itemPerPage = itemPerPage
+	cr.direction = direction
+}
+
+func (cr *Timeline[T]) SetSortingReference(sortingReference string) {
+	cr.sortingReference = sortingReference
 }
 
 func (cr *Timeline[T]) GetItemPerPage() int64 {
@@ -34,7 +48,7 @@ func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 		return errors.New("must set direction!")
 	}
 
-	score, err := redifu.getItemScore(item, cr.sortingReference)
+	score, err := helper.GetItemScore(item, cr.sortingReference)
 	if err != nil {
 		return err
 	}
@@ -58,7 +72,7 @@ func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 			cr.DelBlankPage(sortedSetParam)
 		}
 
-		if cr.direction == redifu.Descending {
+		if cr.direction == definition.Descending {
 			if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) > 0 {
 				lowestScore, err := cr.sortedSetClient.LowestScore(sortedSetParam)
 				if err != nil {
@@ -72,7 +86,7 @@ func (cr *Timeline[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 					return cr.sortedSetClient.SetSortedSet(sortedSetParam, score, item)
 				}
 			}
-		} else if cr.direction == redifu.Ascending {
+		} else if cr.direction == definition.Ascending {
 			if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) > 0 {
 				highestScore, err := cr.sortedSetClient.HighestScore(sortedSetParam)
 				if err != nil {
@@ -134,7 +148,7 @@ func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 }
 
 func (cr *Timeline[T]) IsFirstPage(param []string) (bool, error) {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	fistPageKey := sortedSetKey + ":firstpage"
 
 	getFirstPageKey := cr.client.Get(context.TODO(), fistPageKey)
@@ -153,7 +167,7 @@ func (cr *Timeline[T]) IsFirstPage(param []string) (bool, error) {
 }
 
 func (cr *Timeline[T]) SetFirstPage(param []string) error {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	firstPageKey := sortedSetKey + ":firstpage"
 
 	setFirstPageKey := cr.client.Set(
@@ -170,7 +184,7 @@ func (cr *Timeline[T]) SetFirstPage(param []string) error {
 }
 
 func (cr *Timeline[T]) DelFirstPage(param []string) error {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	firstPageKey := sortedSetKey + ":firstpage"
 
 	setFirstPageKey := cr.client.Del(context.TODO(), firstPageKey)
@@ -182,7 +196,7 @@ func (cr *Timeline[T]) DelFirstPage(param []string) error {
 }
 
 func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":lastpage"
 
 	getLastPageKey := cr.client.Get(context.TODO(), lastPageKey)
@@ -201,7 +215,7 @@ func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
 }
 
 func (cr *Timeline[T]) SetLastPage(param []string) error {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":lastpage"
 
 	setLastPageKey := cr.client.Set(
@@ -218,7 +232,7 @@ func (cr *Timeline[T]) SetLastPage(param []string) error {
 }
 
 func (cr *Timeline[T]) DelLastPage(param []string) error {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":lastpage"
 
 	delLastPageKey := cr.client.Del(context.TODO(), lastPageKey)
@@ -229,7 +243,7 @@ func (cr *Timeline[T]) DelLastPage(param []string) error {
 }
 
 func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	getLastPageKey := cr.client.Get(context.TODO(), lastPageKey)
@@ -248,7 +262,7 @@ func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
 }
 
 func (cr *Timeline[T]) SetBlankPage(param []string) error {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	setLastPageKey := cr.client.Set(
@@ -265,7 +279,7 @@ func (cr *Timeline[T]) SetBlankPage(param []string) error {
 }
 
 func (cr *Timeline[T]) DelBlankPage(param []string) error {
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	delLastPageKey := cr.client.Del(context.TODO(), lastPageKey)
@@ -290,7 +304,7 @@ func (cr *Timeline[T]) Fetch(
 		return nil, validLastRandId, position, errors.New("must set direction!")
 	}
 
-	sortedSetKey := redifu.joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := helper.JoinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
 	start := int64(0)
 	stop := cr.itemPerPage - 1
 
@@ -301,7 +315,7 @@ func (cr *Timeline[T]) Fetch(
 		}
 
 		var rank *redis.IntCmd
-		if cr.direction == redifu.Descending {
+		if cr.direction == definition.Descending {
 			rank = cr.client.ZRevRank(context.TODO(), sortedSetKey, item.GetRandId())
 		} else {
 			rank = cr.client.ZRank(context.TODO(), sortedSetKey, item.GetRandId())
@@ -317,7 +331,7 @@ func (cr *Timeline[T]) Fetch(
 
 	var listRandIds []string
 	var result *redis.StringSliceCmd
-	if cr.direction == redifu.Descending {
+	if cr.direction == definition.Descending {
 		result = cr.client.ZRevRange(context.TODO(), sortedSetKey, start, stop)
 	} else {
 		result = cr.client.ZRange(context.TODO(), sortedSetKey, start, stop)
@@ -342,18 +356,18 @@ func (cr *Timeline[T]) Fetch(
 	}
 
 	if start == 0 {
-		position = redifu.firstPage
+		position = definition.FirstPage
 	} else if int64(len(listRandIds)) < cr.itemPerPage {
-		position = redifu.lastPage
+		position = definition.LastPage
 	} else {
-		position = redifu.middlePage
+		position = definition.MiddlePage
 	}
 
 	return items, validLastRandId, position, nil
 }
 
 func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return redifu.fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs)
+	return FetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs)
 }
 
 func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {

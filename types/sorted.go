@@ -2,6 +2,7 @@ package types
 
 import (
 	"context"
+
 	"github.com/21strive/item"
 	"github.com/21strive/redifu/definition"
 	"github.com/21strive/redifu/helper"
@@ -93,6 +94,16 @@ type Sorted[T item.Blueprint] struct {
 	sortingReference string
 }
 
+func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T]) {
+	srtd.client = client
+	srtd.baseClient = baseClient
+	srtd.sortedSetClient = sortedSetClient
+}
+
+func (srtd *Sorted[T]) SetSortingReference(sortingReference string) {
+	srtd.sortingReference = sortingReference
+}
+
 func (srtd *Sorted[T]) AddItem(item T, sortedSetParam []string) {
 	srtd.IngestItem(item, sortedSetParam, false)
 }
@@ -127,7 +138,7 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 }
 
 func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return helper.FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, srtd.baseClient.timeToLive, processor, processorArgs)
+	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, srtd.baseClient.timeToLive, processor, processorArgs)
 }
 
 func (srtd *Sorted[T]) SetBlankPage(param []string) error {
