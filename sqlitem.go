@@ -1,4 +1,4 @@
-package types
+package redifu
 
 import (
 	"github.com/21strive/item"

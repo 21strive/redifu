@@ -1,11 +1,10 @@
-package types
+package redifu
 
 import (
 	"context"
+	"time"
 
 	"github.com/21strive/item"
-	"github.com/21strive/redifu/definition"
-	"github.com/21strive/redifu/helper"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -48,7 +47,7 @@ func (sm *SegmentManager[T]) AddSegment(start float64, end float64) {
 }
 
 func (sm *SegmentManager[T]) IsWithinSegment(start float64, end float64) *Segment {
-	keySegmentList := helper.JoinParam(sm.sortedSetClient.sortedSetKeyFormat, []string{sm.segmentDesignation})
+	keySegmentList := joinParam(sm.sortedSetClient.sortedSetKeyFormat, []string{sm.segmentDesignation})
 
 	segments, errFetchSegments := sm.client.ZRange(context.TODO(), keySegmentList, 0, -1).Result()
 	if errFetchSegments != nil {
@@ -109,7 +108,7 @@ func (srtd *Sorted[T]) AddItem(item T, sortedSetParam []string) {
 }
 
 func (srtd *Sorted[T]) IngestItem(item T, sortedSetParam []string, seed bool) error {
-	score, err := helper.GetItemScore(item, srtd.sortingReference)
+	score, err := getItemScore(item, srtd.sortingReference)
 	if err != nil {
 		return err
 	}
@@ -138,11 +137,11 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 }
 
 func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return FetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, srtd.baseClient.timeToLive, processor, processorArgs)
+	return fetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, srtd.baseClient.timeToLive, processor, processorArgs)
 }
 
 func (srtd *Sorted[T]) SetBlankPage(param []string) error {
-	sortedSetKey := helper.JoinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	setLastPageKey := srtd.client.Set(
@@ -159,7 +158,7 @@ func (srtd *Sorted[T]) SetBlankPage(param []string) error {
 }
 
 func (srtd *Sorted[T]) DelBlankPage(param []string) error {
-	sortedSetKey := helper.JoinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	delLastPageKey := srtd.client.Del(context.TODO(), lastPageKey)
@@ -170,7 +169,7 @@ func (srtd *Sorted[T]) DelBlankPage(param []string) error {
 }
 
 func (srtd *Sorted[T]) IsBlankPage(param []string) (bool, error) {
-	sortedSetKey := helper.JoinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
+	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	getLastPageKey := srtd.client.Get(context.TODO(), lastPageKey)
@@ -214,7 +213,7 @@ func (srtd *Sorted[T]) RemoveSorted(param []string) error {
 }
 
 func (srtd *Sorted[T]) PurgeSorted(param []string) error {
-	items, err := srtd.Fetch(param, definition.Descending, nil, nil)
+	items, err := srtd.Fetch(param, Descending, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -229,4 +228,23 @@ func (srtd *Sorted[T]) PurgeSorted(param []string) error {
 	}
 
 	return nil
+}
+
+func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) *Sorted[T] {
+	sortedSetClient := &SortedSet[T]{}
+	sortedSetClient.Init(client, keyFormat, timeToLive)
+
+	sorted := &Sorted[T]{}
+	sorted.Init(client, baseClient, sortedSetClient)
+	return sorted
+}
+
+func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, sortingReference string, timeToLive time.Duration) *Sorted[T] {
+	sortedSetClient := &SortedSet[T]{}
+	sortedSetClient.Init(client, keyFormat, timeToLive)
+
+	sorted := &Sorted[T]{}
+	sorted.Init(client, baseClient, sortedSetClient)
+	sorted.SetSortingReference(sortingReference)
+	return sorted
 }

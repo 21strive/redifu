@@ -1,4 +1,4 @@
-package types
+package redifu
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/21strive/item"
-	"github.com/21strive/redifu/helper"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -27,7 +26,7 @@ func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) erro
 	if param == nil {
 		key = cr.sortedSetKeyFormat
 	} else {
-		key = helper.JoinParam(cr.sortedSetKeyFormat, param)
+		key = joinParam(cr.sortedSetKeyFormat, param)
 	}
 
 	sortedSetMember := redis.Z{
@@ -56,7 +55,7 @@ func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) erro
 }
 
 func (cr *SortedSet[T]) DeleteFromSortedSet(param []string, item T) error {
-	key := helper.JoinParam(cr.sortedSetKeyFormat, param)
+	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	removeFromSortedSet := cr.client.ZRem(
 		context.TODO(),
@@ -71,7 +70,7 @@ func (cr *SortedSet[T]) DeleteFromSortedSet(param []string, item T) error {
 }
 
 func (cr *SortedSet[T]) TotalItemOnSortedSet(param []string) int64 {
-	key := helper.JoinParam(cr.sortedSetKeyFormat, param)
+	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	getTotalItemSortedSet := cr.client.ZCard(context.TODO(), key)
 	if getTotalItemSortedSet.Err() != nil {
@@ -82,7 +81,7 @@ func (cr *SortedSet[T]) TotalItemOnSortedSet(param []string) int64 {
 }
 
 func (cr *SortedSet[T]) DeleteSortedSet(param []string) error {
-	key := helper.JoinParam(cr.sortedSetKeyFormat, param)
+	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	removeSortedSet := cr.client.Del(context.TODO(), key)
 	if removeSortedSet.Err() != nil {
@@ -93,7 +92,7 @@ func (cr *SortedSet[T]) DeleteSortedSet(param []string) error {
 }
 
 func (cr *SortedSet[T]) LowestScore(param []string) (float64, error) {
-	key := helper.JoinParam(cr.sortedSetKeyFormat, param)
+	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	result, err := cr.client.ZRangeWithScores(context.TODO(), key, 0, 0).Result()
 	if err != nil {
@@ -108,7 +107,7 @@ func (cr *SortedSet[T]) LowestScore(param []string) (float64, error) {
 }
 
 func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
-	key := helper.JoinParam(cr.sortedSetKeyFormat, param)
+	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	result, err := cr.client.ZRangeWithScores(context.TODO(), key, -1, -1).Result()
 	if err != nil {
@@ -120,4 +119,10 @@ func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
 	}
 
 	return result[0].Score, nil
+}
+
+func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) *SortedSet[T] {
+	sorted := &SortedSet[T]{}
+	sorted.Init(client, sortedSetKeyFormat, timeToLive)
+	return sorted
 }

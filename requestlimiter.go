@@ -1,4 +1,4 @@
-package types
+package redifu
 
 import (
 	"context"
@@ -65,4 +65,12 @@ func (eq *RequestLimiter[T]) Worker(ctx context.Context) {
 			}
 		}(randId)
 	}
+}
+
+func NewRequestLimiter[T item.Blueprint](redis redis.UniversalClient, name string, throughput int64, processor func(string) error, errorLogger func(error, string)) *RequestLimiter[T] {
+	duration := time.Duration(60/throughput) * time.Second
+
+	requestLimiter := &RequestLimiter[T]{}
+	requestLimiter.Init(redis, name, throughput, duration, processor, errorLogger)
+	return requestLimiter
 }

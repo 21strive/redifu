@@ -1,82 +1,127 @@
 package redifu
 
 import (
-	"database/sql"
-	"time"
-
+	"context"
+	"errors"
+	"fmt"
 	"github.com/21strive/item"
-	"github.com/21strive/redifu/definition"
-	sqlSeeder "github.com/21strive/redifu/seeder/sql"
-	"github.com/21strive/redifu/types"
 	"github.com/redis/go-redis/v9"
+	"reflect"
+	"time"
 )
 
-func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *types.Base[T] {
-	base := &types.Base[T]{}
-	base.Init(client, itemKeyFormat, timeToLive)
-	return base
-}
+var (
+	NoDatabaseProvided           = errors.New("No database provided!")
+	DocumentOrReferencesNotFound = errors.New("Document or References not found!")
+	QueryOrScannerNotConfigured  = errors.New("Required queries or scanner not configured")
+	NilConfiguration             = errors.New("No configuration found!")
+)
 
-func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) *types.SortedSet[T] {
-	sorted := &types.SortedSet[T]{}
-	sorted.Init(client, sortedSetKeyFormat, timeToLive)
-	return sorted
-}
-
-func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *types.Base[T], keyFormat string, itemPerPage int64, direction string, sortingReference string, timeToLive time.Duration) *types.Timeline[T] {
-	if direction != definition.Ascending && direction != definition.Descending {
-		direction = definition.Descending
+func getFieldValue(obj interface{}, fieldName string) interface{} {
+	val := reflect.ValueOf(obj)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
 	}
 
-	sortedSetClient := types.SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat, timeToLive)
-
-	timeline := &types.Timeline[T]{}
-	timeline.Init(client, baseClient, &sortedSetClient, itemPerPage, direction)
-	timeline.SetSortingReference(sortingReference)
-	return timeline
-}
-
-func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *types.Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) *types.Timeline[T] {
-	if direction != definition.Ascending && direction != definition.Descending {
-		direction = definition.Descending
+	if val.Kind() != reflect.Struct {
+		return time.Time{}
 	}
 
-	sortedSetClient := &types.SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat, timeToLive)
+	field := val.FieldByName(fieldName)
+	if !field.IsValid() {
+		return time.Time{}
+	}
 
-	timeline := &types.Timeline[T]{}
-	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction)
-	return timeline
+	return field.Interface()
 }
 
-func NewTimelineSQLSeeder[T types.SQLItemBlueprint](db *sql.DB, baseClient *types.Base[T], paginateClient *types.Timeline[T]) *sqlSeeder.TimelineSQLSeeder[T] {
-	return sqlSeeder.NewTimelineSQLSeeder(db, baseClient, paginateClient)
+func getItemScore[T item.Blueprint](item T, sortingReference string) (float64, error) {
+	if sortingReference == "" || sortingReference == "createdAt" {
+		if scorer, ok := interface{}(item).(interface{ GetCreatedAt() time.Time }); ok {
+			return float64(scorer.GetCreatedAt().UnixMilli()), nil
+		}
+	}
+
+	val := reflect.ValueOf(item)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return 0, errors.New("getItemScore: item must be a struct or pointer to struct")
+	}
+
+	field := val.FieldByName(sortingReference)
+	if !field.IsValid() {
+		return 0, fmt.Errorf("getItemScore: field %s not found in item", sortingReference)
+	}
+
+	switch field.Type() {
+	case reflect.TypeOf(time.Time{}):
+		return float64(field.Interface().(time.Time).UnixMilli()), nil
+	case reflect.TypeOf(&time.Time{}):
+		if field.IsNil() {
+			return 0, errors.New("getItemScore: time field is nil")
+		}
+		return float64(field.Interface().(*time.Time).UnixMilli()), nil
+	case reflect.TypeOf(int64(0)):
+		return float64(field.Interface().(int64)), nil
+	default:
+		return 0, fmt.Errorf("getItemScore: field %s is not a time.Time", sortingReference)
+	}
 }
 
-func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *types.Base[T], keyFormat string, sortingReference string, timeToLive time.Duration) *types.Sorted[T] {
-	sortedSetClient := &types.SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat, timeToLive)
-
-	sorted := &types.Sorted[T]{}
-	sorted.Init(client, baseClient, sortedSetClient)
-	sorted.SetSortingReference(sortingReference)
-	return sorted
+func joinParam(keyFormat string, param []string) string {
+	interfaces := make([]interface{}, len(param))
+	for i, v := range param {
+		interfaces[i] = v
+	}
+	sortedSetKey := fmt.Sprintf(keyFormat, interfaces...)
+	return sortedSetKey
 }
 
-func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *types.Base[T], keyFormat string, timeToLive time.Duration) *types.Sorted[T] {
-	sortedSetClient := &types.SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat, timeToLive)
+func fetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], param []string, direction string, timeToLive time.Duration, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
+	var items []T
+	var extendTTL bool
 
-	sorted := &types.Sorted[T]{}
-	sorted.Init(client, baseClient, sortedSetClient)
-	return sorted
-}
+	if direction == "" {
+		return nil, errors.New("must set direction!")
+	}
 
-func NewRequestLimiter[T item.Blueprint](redis redis.UniversalClient, name string, throughput int64, processor func(string) error, errorLogger func(error, string)) *types.RequestLimiter[T] {
-	duration := time.Duration(60/throughput) * time.Second
+	sortedSetKey := joinParam(sortedSetClient.sortedSetKeyFormat, param)
 
-	requestLimiter := &types.RequestLimiter[T]{}
-	requestLimiter.Init(redis, name, throughput, duration, processor, errorLogger)
-	return requestLimiter
+	var result *redis.StringSliceCmd
+	if direction == Descending {
+		result = redisClient.ZRevRange(context.TODO(), sortedSetKey, 0, -1)
+	} else {
+		result = redisClient.ZRange(context.TODO(), sortedSetKey, 0, -1)
+	}
+
+	if result.Err() != nil {
+		return nil, result.Err()
+	}
+	listRandIds := result.Val()
+
+	for i := 0; i < len(listRandIds); i++ {
+		if !extendTTL {
+			extendTTL = true
+		}
+
+		item, err := baseClient.Get(listRandIds[i])
+		if err != nil {
+			continue
+		}
+
+		if processor != nil {
+			processor(&item, processorArgs)
+		}
+
+		items = append(items, item)
+	}
+
+	if extendTTL {
+		redisClient.Expire(context.TODO(), sortedSetKey, timeToLive)
+	}
+
+	return items, nil
 }

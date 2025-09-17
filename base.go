@@ -1,4 +1,4 @@
-package types
+package redifu
 
 import (
 	"context"
@@ -148,4 +148,10 @@ func (cr *Base[T]) DelBlank(param ...string) error {
 		return delBlank.Err()
 	}
 	return nil
+}
+
+func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *Base[T] {
+	base := &Base[T]{}
+	base.Init(client, itemKeyFormat, timeToLive)
+	return base
 }

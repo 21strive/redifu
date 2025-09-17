@@ -1,4 +1,4 @@
-package definition
+package redifu
 
 const (
 	FirstPage  = "FIRST_PAGE"
