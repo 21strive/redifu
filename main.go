@@ -72,3 +72,11 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *types
 	sorted.Init(client, baseClient, sortedSetClient)
 	return sorted
 }
+
+func NewRequestLimiter[T item.Blueprint](redis redis.UniversalClient, name string, throughput int64, processor func(string) error, errorLogger func(error, string)) *types.RequestLimiter[T] {
+	duration := time.Duration(60/throughput) * time.Second
+
+	requestLimiter := &types.RequestLimiter[T]{}
+	requestLimiter.Init(redis, name, throughput, duration, processor, errorLogger)
+	return requestLimiter
+}
