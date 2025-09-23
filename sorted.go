@@ -187,7 +187,7 @@ func (srtd *Sorted[T]) IsBlankPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (srtd *Sorted[T]) RequireSeeding(param []string) (bool, error) {
+func (srtd *Sorted[T]) RequiresSeeding(param []string) (bool, error) {
 	isBlankPage, err := srtd.IsBlankPage(param)
 	if err != nil {
 		return false, err
