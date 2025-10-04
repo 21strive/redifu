@@ -21,6 +21,8 @@ type RowScanner[T redifu.SQLItemBlueprint] func(row *sql.Row) (T, error)
 
 type RowsScanner[T redifu.SQLItemBlueprint] func(rows *sql.Rows) (T, error)
 
+type RowsScannerTimeline[T redifu.SQLItemBlueprint] func(rows *sql.Rows, paginationClient *redifu.Timeline[T]) (T, error)
+
 type TimelineSQLSeeder[T redifu.SQLItemBlueprint] struct {
 	db               *sql.DB
 	baseClient       *redifu.Base[T]
@@ -60,7 +62,7 @@ func (s *TimelineSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T]
 	return s.baseClient.Set(item)
 }
 
-func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
+func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScannerTimeline[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -102,7 +104,7 @@ func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery strin
 
 	var counterLoop int64 = 0
 	for rows.Next() {
-		item, err := rowsScanner(rows)
+		item, err := rowsScanner(rows, s.paginationClient)
 		if err != nil {
 			continue
 		}

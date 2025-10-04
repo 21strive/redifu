@@ -355,6 +355,12 @@ func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFo
 	}
 }
 
+type RelationFormat[T item.Blueprint] struct {
+	base            *Base[T]
+	itemAttribute   string
+	randIdAttribute string
+}
+
 type Timeline[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
@@ -362,10 +368,15 @@ type Timeline[T item.Blueprint] struct {
 	itemPerPage      int64
 	direction        string
 	sortingReference string
+	relation         map[string]*RelationFormat[T]
 }
 
 func (cr *Timeline[T]) GetItemPerPage() int64 {
 	return cr.itemPerPage
+}
+
+func (cr *Timeline[T]) AddRelation(identifier string, relationBase *RelationFormat[T]) {
+	cr.relation[identifier] = relationBase
 }
 
 func (cr *Timeline[T]) GetDirection() string {
@@ -678,6 +689,26 @@ func (cr *Timeline[T]) Fetch(
 
 	for i := 0; i < len(listRandIds); i++ {
 		item, err := cr.baseClient.Get(listRandIds[i])
+
+		if cr.relation != nil {
+			for _, relationFormat := range cr.relation {
+				v := reflect.ValueOf(item)
+
+				if v.Kind() == reflect.Ptr {
+					v = v.Elem()
+				}
+
+				relationRandId := v.FieldByName(relationFormat.randIdAttribute)
+				relationItem, errGet := relationFormat.base.Get(relationRandId.String())
+				if errGet != nil {
+					continue
+				}
+
+				relationAttr := v.FieldByName(relationFormat.itemAttribute)
+				relationAttr.Set(reflect.ValueOf(relationItem))
+			}
+		}
+
 		if err != nil {
 			continue
 		}
