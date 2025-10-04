@@ -1,30 +1,19 @@
-package sql
+package redifu
 
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"github.com/21strive/redifu"
-	"reflect"
 	"strconv"
-	"time"
 )
 
-var (
-	NoDatabaseProvided           = errors.New("No database provided!")
-	DocumentOrReferencesNotFound = errors.New("Document or References not found!")
-	QueryOrScannerNotConfigured  = errors.New("Required queries or scanner not configured")
-	NilConfiguration             = errors.New("No configuration found!")
-)
+type RowScanner[T SQLItemBlueprint] func(row *sql.Row) (T, error)
 
-type RowScanner[T redifu.SQLItemBlueprint] func(row *sql.Row) (T, error)
+type RowsScanner[T SQLItemBlueprint] func(rows *sql.Rows) (T, error)
 
-type RowsScanner[T redifu.SQLItemBlueprint] func(rows *sql.Rows) (T, error)
-
-type TimelineSQLSeeder[T redifu.SQLItemBlueprint] struct {
+type TimelineSQLSeeder[T SQLItemBlueprint] struct {
 	db               *sql.DB
-	baseClient       *redifu.Base[T]
-	paginationClient *redifu.Timeline[T]
+	baseClient       *Base[T]
+	paginationClient *Timeline[T]
 	scoringField     string
 }
 
@@ -123,7 +112,7 @@ func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery strin
 	return nil
 }
 
-func NewPaginateSQLSeeder[T redifu.SQLItemBlueprint](db *sql.DB, baseClient *redifu.Base[T], paginateClient *redifu.Timeline[T]) *TimelineSQLSeeder[T] {
+func NewTimelineSQLSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSQLSeeder[T] {
 	return &TimelineSQLSeeder[T]{
 		db:               db,
 		baseClient:       baseClient,
@@ -131,10 +120,10 @@ func NewPaginateSQLSeeder[T redifu.SQLItemBlueprint](db *sql.DB, baseClient *red
 	}
 }
 
-type SortedSQLSeeder[T redifu.SQLItemBlueprint] struct {
+type SortedSQLSeeder[T SQLItemBlueprint] struct {
 	db           *sql.DB
-	baseClient   *redifu.Base[T]
-	sortedClient *redifu.Sorted[T]
+	baseClient   *Base[T]
+	sortedClient *Sorted[T]
 	scoringField string
 }
 
@@ -177,32 +166,14 @@ func (s *SortedSQLSeeder[T]) SeedAll(
 	return nil
 }
 
-func NewSortedSQLSeeder[T redifu.SQLItemBlueprint](
+func NewSortedSQLSeeder[T SQLItemBlueprint](
 	db *sql.DB,
-	baseClient *redifu.Base[T],
-	sortedClient *redifu.Sorted[T],
+	baseClient *Base[T],
+	sortedClient *Sorted[T],
 ) *SortedSQLSeeder[T] {
 	return &SortedSQLSeeder[T]{
 		db:           db,
 		baseClient:   baseClient,
 		sortedClient: sortedClient,
 	}
-}
-
-func getFieldValue(obj interface{}, fieldName string) interface{} {
-	val := reflect.ValueOf(obj)
-	if val.Kind() == reflect.Ptr {
-		val = val.Elem()
-	}
-
-	if val.Kind() != reflect.Struct {
-		return time.Time{}
-	}
-
-	field := val.FieldByName(fieldName)
-	if !field.IsValid() {
-		return time.Time{}
-	}
-
-	return field.Interface()
 }
