@@ -3,6 +3,8 @@ package redifu
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/21strive/item"
@@ -16,6 +18,7 @@ type Timeline[T item.Blueprint] struct {
 	itemPerPage      int64
 	direction        string
 	sortingReference string
+	relation         map[string]Relation
 }
 
 func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], itemPerPage int64, direction string) {
@@ -24,6 +27,13 @@ func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], s
 	cr.sortedSetClient = sortedSetClient
 	cr.itemPerPage = itemPerPage
 	cr.direction = direction
+}
+
+func (cr *Timeline[T]) AddRelation(identifier string, relationBase Relation) {
+	if cr.relation == nil {
+		cr.relation = make(map[string]Relation)
+	}
+	cr.relation[identifier] = relationBase
 }
 
 func (cr *Timeline[T]) SetSortingReference(sortingReference string) {
@@ -344,6 +354,56 @@ func (cr *Timeline[T]) Fetch(
 
 	for i := 0; i < len(listRandIds); i++ {
 		item, err := cr.baseClient.Get(listRandIds[i])
+
+		fmt.Printf("cr.relation type: %T\n", cr.relation)
+		fmt.Printf("cr.relation is nil: %v\n", cr.relation == nil)
+		fmt.Printf("cr.relation length: %d\n", len(cr.relation))
+		fmt.Printf("cr.relation value: %+v\n", cr.relation)
+
+		fmt.Printf("About to iterate. Map length: %d\n", len(cr.relation))
+		fmt.Printf("Map contents: %+v\n", cr.relation)
+
+		// Try explicit iteration
+		for k, v := range cr.relation {
+			fmt.Printf("Found key: %s, value: %v\n", k, v)
+		}
+
+		if cr.relation != nil {
+			for _, relationFormat := range cr.relation {
+				fmt.Println("test")
+				v := reflect.ValueOf(&item) // Get pointer to item
+
+				if v.Kind() == reflect.Ptr {
+					v = v.Elem()
+				}
+
+				// Get the randId field value
+				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
+				if !relationRandIdField.IsValid() {
+					continue
+				}
+
+				relationRandId := relationRandIdField.String()
+				if relationRandId == "" {
+					continue
+				}
+
+				// Fetch related item using interface method
+				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
+				if errGet != nil {
+					continue
+				}
+
+				// Set the relation field
+				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
+				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
+					continue
+				}
+
+				relationAttrField.Set(reflect.ValueOf(relationItem))
+			}
+		}
+
 		if err != nil {
 			continue
 		}
@@ -457,7 +517,9 @@ func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Bas
 	sortedSetClient := &SortedSet[T]{}
 	sortedSetClient.Init(client, keyFormat, timeToLive)
 
-	timeline := &Timeline[T]{}
+	timeline := &Timeline[T]{
+		relation: make(map[string]Relation), // Initialize the map
+	}
 	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction)
 	return timeline
 }

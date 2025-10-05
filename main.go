@@ -125,3 +125,45 @@ func fetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *B
 
 	return items, nil
 }
+
+type Relation interface {
+	GetByRandId(randId string) (interface{}, error)
+	GetItemAttribute() string
+	GetRandIdAttribute() string
+	SetItem(item interface{}) error
+}
+
+type RelationFormat[T item.Blueprint] struct {
+	base            *Base[T]
+	itemAttribute   string
+	randIdAttribute string
+}
+
+// Implement Relation interface
+func (r *RelationFormat[T]) GetByRandId(randId string) (interface{}, error) {
+	return r.base.Get(randId)
+}
+
+func (r *RelationFormat[T]) GetItemAttribute() string {
+	return r.itemAttribute
+}
+
+func (r *RelationFormat[T]) GetRandIdAttribute() string {
+	return r.randIdAttribute
+}
+
+func (r *RelationFormat[T]) SetItem(item interface{}) error {
+	typedItem, ok := item.(T)
+	if !ok {
+		return fmt.Errorf("invalid item type: expected %T, got %T", *new(T), item)
+	}
+	return r.base.Set(typedItem)
+}
+
+func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {
+	relation := &RelationFormat[T]{}
+	relation.base = base
+	relation.itemAttribute = itemAttributeName
+	relation.randIdAttribute = randIdAttributeName
+	return relation
+}

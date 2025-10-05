@@ -3,12 +3,14 @@ package redifu
 import (
 	"context"
 	"database/sql"
+	"log"
 	"strconv"
 )
 
 type RowScanner[T SQLItemBlueprint] func(row *sql.Row) (T, error)
 
 type RowsScanner[T SQLItemBlueprint] func(rows *sql.Rows) (T, error)
+type RowsScannerWithRelation[T SQLItemBlueprint] func(rows *sql.Rows, relation map[string]Relation) (T, error)
 
 type TimelineSQLSeeder[T SQLItemBlueprint] struct {
 	db               *sql.DB
@@ -50,6 +52,18 @@ func (s *TimelineSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T]
 }
 
 func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
+	return s.seedPartialInternal(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows)
+	})
+}
+
+func (s *TimelineSQLSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
+	return s.seedPartialInternal(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
+		return rowsScannerWithJoin(rows, s.paginationClient.relation)
+	})
+}
+
+func (s *TimelineSQLSeeder[T]) seedPartialInternal(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, scanFunc func(*sql.Rows) (T, error)) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -91,9 +105,9 @@ func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery strin
 
 	var counterLoop int64 = 0
 	for rows.Next() {
-		item, err := rowsScanner(rows)
+		item, err := scanFunc(rows)
 		if err != nil {
-			continue
+			log.Printf("rowscanner: %s", err)
 		}
 
 		s.baseClient.Set(item)
