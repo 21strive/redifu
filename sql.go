@@ -52,18 +52,18 @@ func (s *TimelineSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T]
 }
 
 func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
-	return s.seedPartialInternal(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
+	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
 }
 
 func (s *TimelineSQLSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
-	return s.seedPartialInternal(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
+	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
 		return rowsScannerWithJoin(rows, s.paginationClient.relation)
 	})
 }
 
-func (s *TimelineSQLSeeder[T]) seedPartialInternal(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, scanFunc func(*sql.Rows) (T, error)) error {
+func (s *TimelineSQLSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, scanFunc func(*sql.Rows) (T, error)) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -108,6 +108,7 @@ func (s *TimelineSQLSeeder[T]) seedPartialInternal(rowQuery string, firstPageQue
 		item, err := scanFunc(rows)
 		if err != nil {
 			log.Printf("rowscanner: %s", err)
+			continue
 		}
 
 		s.baseClient.Set(item)
@@ -141,17 +142,29 @@ type SortedSQLSeeder[T SQLItemBlueprint] struct {
 	scoringField string
 }
 
-func (s *SortedSQLSeeder[T]) SeedAll(
+func (s *SortedSQLSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
+	return s.seedAll(query, args, keyParam, func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows)
+	})
+}
+
+func (s *SortedSQLSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
+	return s.seedAll(query, args, keyParam, func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows, s.sortedClient.relation)
+	})
+}
+
+func (s *SortedSQLSeeder[T]) seedAll(
 	query string,
-	rowsScanner RowsScanner[T],
 	args []interface{},
 	keyParam []string,
+	scanFunc func(*sql.Rows) (T, error),
 ) error {
 	if s.db == nil {
 		return NoDatabaseProvided
 	}
 
-	if rowsScanner == nil {
+	if scanFunc == nil {
 		return QueryOrScannerNotConfigured
 	}
 
@@ -163,7 +176,7 @@ func (s *SortedSQLSeeder[T]) SeedAll(
 
 	var counterLoop int64
 	for rows.Next() {
-		item, err := rowsScanner(rows)
+		item, err := scanFunc(rows)
 		if err != nil {
 			continue
 		}

@@ -80,9 +80,18 @@ func joinParam(keyFormat string, param []string) string {
 	return sortedSetKey
 }
 
-func fetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], param []string, direction string, timeToLive time.Duration, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
+func fetchAll[T item.Blueprint](
+	redisClient redis.UniversalClient,
+	baseClient *Base[T],
+	sortedSetClient *SortedSet[T],
+	param []string,
+	direction string,
+	timeToLive time.Duration,
+	processor func(item *T, args []interface{}),
+	processorArgs []interface{},
+	relation map[string]Relation,
+) ([]T, error) {
 	var items []T
-	var extendTTL bool
 
 	if direction == "" {
 		return nil, errors.New("must set direction!")
@@ -103,15 +112,46 @@ func fetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *B
 	listRandIds := result.Val()
 
 	for i := 0; i < len(listRandIds); i++ {
-		if !extendTTL {
-			extendTTL = true
-		}
 
 		item, err := baseClient.Get(listRandIds[i])
 		if err != nil {
 			continue
 		}
 
+		if relation != nil {
+			for _, relationFormat := range relation {
+				v := reflect.ValueOf(&item)
+
+				if v.Kind() == reflect.Ptr {
+					v = v.Elem()
+				}
+
+				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
+				if !relationRandIdField.IsValid() {
+					continue
+				}
+
+				relationRandId := relationRandIdField.String()
+				if relationRandId == "" {
+					continue
+				}
+
+				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
+				if errGet != nil {
+					continue
+				}
+
+				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
+				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
+					continue
+				}
+
+				relationAttrField.Set(reflect.ValueOf(relationItem))
+				if relationRandIdField.CanSet() {
+					relationRandIdField.SetString("")
+				}
+			}
+		}
 		if processor != nil {
 			processor(&item, processorArgs)
 		}
@@ -119,10 +159,7 @@ func fetchAll[T item.Blueprint](redisClient redis.UniversalClient, baseClient *B
 		items = append(items, item)
 	}
 
-	if extendTTL {
-		redisClient.Expire(context.TODO(), sortedSetKey, timeToLive)
-	}
-
+	redisClient.Expire(context.TODO(), sortedSetKey, timeToLive)
 	return items, nil
 }
 

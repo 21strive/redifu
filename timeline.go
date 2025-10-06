@@ -3,7 +3,6 @@ package redifu
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"time"
 
@@ -354,30 +353,18 @@ func (cr *Timeline[T]) Fetch(
 
 	for i := 0; i < len(listRandIds); i++ {
 		item, err := cr.baseClient.Get(listRandIds[i])
-
-		fmt.Printf("cr.relation type: %T\n", cr.relation)
-		fmt.Printf("cr.relation is nil: %v\n", cr.relation == nil)
-		fmt.Printf("cr.relation length: %d\n", len(cr.relation))
-		fmt.Printf("cr.relation value: %+v\n", cr.relation)
-
-		fmt.Printf("About to iterate. Map length: %d\n", len(cr.relation))
-		fmt.Printf("Map contents: %+v\n", cr.relation)
-
-		// Try explicit iteration
-		for k, v := range cr.relation {
-			fmt.Printf("Found key: %s, value: %v\n", k, v)
+		if err != nil {
+			continue
 		}
 
 		if cr.relation != nil {
 			for _, relationFormat := range cr.relation {
-				fmt.Println("test")
-				v := reflect.ValueOf(&item) // Get pointer to item
+				v := reflect.ValueOf(&item)
 
 				if v.Kind() == reflect.Ptr {
 					v = v.Elem()
 				}
 
-				// Get the randId field value
 				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
 				if !relationRandIdField.IsValid() {
 					continue
@@ -388,28 +375,26 @@ func (cr *Timeline[T]) Fetch(
 					continue
 				}
 
-				// Fetch related item using interface method
 				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
 				if errGet != nil {
 					continue
 				}
 
-				// Set the relation field
 				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
 				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
 					continue
 				}
 
 				relationAttrField.Set(reflect.ValueOf(relationItem))
+				if relationRandIdField.CanSet() {
+					relationRandIdField.SetString("")
+				}
 			}
-		}
-
-		if err != nil {
-			continue
 		}
 		if processor != nil {
 			processor(&item, processorArgs)
 		}
+
 		items = append(items, item)
 		validLastRandId = listRandIds[i]
 	}
@@ -426,7 +411,7 @@ func (cr *Timeline[T]) Fetch(
 }
 
 func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs)
+	return fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs, cr.relation)
 }
 
 func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
