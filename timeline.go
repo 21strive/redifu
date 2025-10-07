@@ -35,6 +35,10 @@ func (cr *Timeline[T]) AddRelation(identifier string, relationBase Relation) {
 	cr.relation[identifier] = relationBase
 }
 
+func (cr *Timeline[T]) GetRelation() map[string]Relation {
+	return cr.relation
+}
+
 func (cr *Timeline[T]) SetSortingReference(sortingReference string) {
 	cr.sortingReference = sortingReference
 }

@@ -107,6 +107,10 @@ func (cr *Sorted[T]) AddRelation(identifier string, relationBase Relation) {
 	cr.relation[identifier] = relationBase
 }
 
+func (cr *Sorted[T]) GetRelation() map[string]Relation {
+	return cr.relation
+}
+
 func (srtd *Sorted[T]) SetSortingReference(sortingReference string) {
 	srtd.sortingReference = sortingReference
 }
