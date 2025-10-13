@@ -12,14 +12,14 @@ type RowScanner[T SQLItemBlueprint] func(row *sql.Row) (T, error)
 type RowsScanner[T SQLItemBlueprint] func(rows *sql.Rows) (T, error)
 type RowsScannerWithRelation[T SQLItemBlueprint] func(rows *sql.Rows, relation map[string]Relation) (T, error)
 
-type TimelineSQLSeeder[T SQLItemBlueprint] struct {
+type TimelineSeeder[T SQLItemBlueprint] struct {
 	db               *sql.DB
 	baseClient       *Base[T]
 	paginationClient *Timeline[T]
 	scoringField     string
 }
 
-func (s *TimelineSQLSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) (T, error) {
+func (s *TimelineSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) (T, error) {
 	var item T
 	if s.db == nil {
 		return item, NoDatabaseProvided
@@ -42,7 +42,7 @@ func (s *TimelineSQLSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T]
 	return item, nil
 }
 
-func (s *TimelineSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) error {
+func (s *TimelineSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) error {
 	item, err := s.FindOne(rowQuery, rowScanner, queryArgs)
 	if err != nil {
 		return err
@@ -51,19 +51,19 @@ func (s *TimelineSQLSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T]
 	return s.baseClient.Set(item)
 }
 
-func (s *TimelineSQLSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
+func (s *TimelineSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
 	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
 }
 
-func (s *TimelineSQLSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
+func (s *TimelineSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
 	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
 		return rowsScannerWithJoin(rows, s.paginationClient.relation)
 	})
 }
 
-func (s *TimelineSQLSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, scanFunc func(*sql.Rows) (T, error)) error {
+func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, scanFunc func(*sql.Rows) (T, error)) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -127,34 +127,34 @@ func (s *TimelineSQLSeeder[T]) partialSeed(rowQuery string, firstPageQuery strin
 	return nil
 }
 
-func NewTimelineSQLSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSQLSeeder[T] {
-	return &TimelineSQLSeeder[T]{
+func NewTimelineSQLSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
+	return &TimelineSeeder[T]{
 		db:               db,
 		baseClient:       baseClient,
 		paginationClient: paginateClient,
 	}
 }
 
-type SortedSQLSeeder[T SQLItemBlueprint] struct {
+type SortedSeeder[T SQLItemBlueprint] struct {
 	db           *sql.DB
 	baseClient   *Base[T]
 	sortedClient *Sorted[T]
 	scoringField string
 }
 
-func (s *SortedSQLSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
+func (s *SortedSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
 	return s.seedAll(query, args, keyParam, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
 }
 
-func (s *SortedSQLSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
+func (s *SortedSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
 	return s.seedAll(query, args, keyParam, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows, s.sortedClient.relation)
 	})
 }
 
-func (s *SortedSQLSeeder[T]) seedAll(
+func (s *SortedSeeder[T]) seedAll(
 	query string,
 	args []interface{},
 	keyParam []string,
@@ -197,8 +197,8 @@ func NewSortedSQLSeeder[T SQLItemBlueprint](
 	db *sql.DB,
 	baseClient *Base[T],
 	sortedClient *Sorted[T],
-) *SortedSQLSeeder[T] {
-	return &SortedSQLSeeder[T]{
+) *SortedSeeder[T] {
+	return &SortedSeeder[T]{
 		db:           db,
 		baseClient:   baseClient,
 		sortedClient: sortedClient,
