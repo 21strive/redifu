@@ -3,6 +3,7 @@ package redifu
 import (
 	"context"
 	"errors"
+	"reflect"
 	"time"
 
 	"github.com/21strive/item"
@@ -16,6 +17,7 @@ type Timeline[T item.Blueprint] struct {
 	itemPerPage      int64
 	direction        string
 	sortingReference string
+	relation         map[string]Relation
 }
 
 func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], itemPerPage int64, direction string) {
@@ -24,6 +26,17 @@ func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], s
 	cr.sortedSetClient = sortedSetClient
 	cr.itemPerPage = itemPerPage
 	cr.direction = direction
+}
+
+func (cr *Timeline[T]) AddRelation(identifier string, relationBase Relation) {
+	if cr.relation == nil {
+		cr.relation = make(map[string]Relation)
+	}
+	cr.relation[identifier] = relationBase
+}
+
+func (cr *Timeline[T]) GetRelation() map[string]Relation {
+	return cr.relation
 }
 
 func (cr *Timeline[T]) SetSortingReference(sortingReference string) {
@@ -347,9 +360,45 @@ func (cr *Timeline[T]) Fetch(
 		if err != nil {
 			continue
 		}
+
+		if cr.relation != nil {
+			for _, relationFormat := range cr.relation {
+				v := reflect.ValueOf(&item)
+
+				if v.Kind() == reflect.Ptr {
+					v = v.Elem()
+				}
+
+				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
+				if !relationRandIdField.IsValid() {
+					continue
+				}
+
+				relationRandId := relationRandIdField.String()
+				if relationRandId == "" {
+					continue
+				}
+
+				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
+				if errGet != nil {
+					continue
+				}
+
+				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
+				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
+					continue
+				}
+
+				relationAttrField.Set(reflect.ValueOf(relationItem))
+				if relationRandIdField.CanSet() {
+					relationRandIdField.SetString("")
+				}
+			}
+		}
 		if processor != nil {
 			processor(&item, processorArgs)
 		}
+
 		items = append(items, item)
 		validLastRandId = listRandIds[i]
 	}
@@ -366,7 +415,7 @@ func (cr *Timeline[T]) Fetch(
 }
 
 func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs)
+	return fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs, cr.relation)
 }
 
 func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
@@ -457,7 +506,9 @@ func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Bas
 	sortedSetClient := &SortedSet[T]{}
 	sortedSetClient.Init(client, keyFormat, timeToLive)
 
-	timeline := &Timeline[T]{}
+	timeline := &Timeline[T]{
+		relation: make(map[string]Relation), // Initialize the map
+	}
 	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction)
 	return timeline
 }

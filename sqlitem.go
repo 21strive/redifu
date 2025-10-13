@@ -7,16 +7,16 @@ import (
 
 type SQLItemBlueprint interface {
 	item.Blueprint
-	GetSelf() *SQLItem
+	GetSelf() *Record
 }
 
-type SQLItem struct {
+type Record struct {
 	*item.Foundation `json:",inline" bson:",inline"`
 }
 
-func (si *SQLItem) GetSelf() *SQLItem { return si }
+func (si *Record) GetSelf() *Record { return si }
 
-func InitSQLItem[T SQLItemBlueprint](sqlItem T) {
+func InitRecord[T SQLItemBlueprint](sqlItem T) {
 	value := reflect.ValueOf(sqlItem).Elem()
 
 	// Iterate through the fields of the struct
