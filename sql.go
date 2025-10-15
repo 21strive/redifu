@@ -127,7 +127,7 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 	return nil
 }
 
-func NewTimelineSQLSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
+func NewTimelineSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
 	return &TimelineSeeder[T]{
 		db:               db,
 		baseClient:       baseClient,
@@ -193,7 +193,7 @@ func (s *SortedSeeder[T]) seedAll(
 	return nil
 }
 
-func NewSortedSQLSeeder[T SQLItemBlueprint](
+func NewSortedSeeder[T SQLItemBlueprint](
 	db *sql.DB,
 	baseClient *Base[T],
 	sortedClient *Sorted[T],
