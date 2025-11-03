@@ -161,9 +161,9 @@ func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 
 func (cr *Timeline[T]) IsFirstPage(param []string) (bool, error) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
-	fistPageKey := sortedSetKey + ":firstpage"
+	firstPageKey := sortedSetKey + ":firstpage"
 
-	getFirstPageKey := cr.client.Get(context.TODO(), fistPageKey)
+	getFirstPageKey := cr.client.Get(context.TODO(), firstPageKey)
 	if getFirstPageKey.Err() != nil {
 		if getFirstPageKey.Err() == redis.Nil {
 			return false, nil
@@ -171,6 +171,8 @@ func (cr *Timeline[T]) IsFirstPage(param []string) (bool, error) {
 			return false, getFirstPageKey.Err()
 		}
 	}
+
+	cr.client.Expire(context.TODO(), firstPageKey, cr.sortedSetClient.timeToLive)
 
 	if getFirstPageKey.Val() == "1" {
 		return true, nil
@@ -186,7 +188,7 @@ func (cr *Timeline[T]) SetFirstPage(param []string) error {
 		context.TODO(),
 		firstPageKey,
 		1,
-		cr.baseClient.timeToLive,
+		cr.sortedSetClient.timeToLive,
 	)
 
 	if setFirstPageKey.Err() != nil {
@@ -220,6 +222,8 @@ func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
 		}
 	}
 
+	cr.client.Expire(context.TODO(), lastPageKey, cr.sortedSetClient.timeToLive)
+
 	if getLastPageKey.Val() == "1" {
 		return true, nil
 	}
@@ -234,7 +238,7 @@ func (cr *Timeline[T]) SetLastPage(param []string) error {
 		context.TODO(),
 		lastPageKey,
 		1,
-		cr.baseClient.timeToLive,
+		cr.sortedSetClient.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
@@ -256,9 +260,9 @@ func (cr *Timeline[T]) DelLastPage(param []string) error {
 
 func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
-	lastPageKey := sortedSetKey + ":blankpage"
+	blankPageKey := sortedSetKey + ":blankpage"
 
-	getLastPageKey := cr.client.Get(context.TODO(), lastPageKey)
+	getLastPageKey := cr.client.Get(context.TODO(), blankPageKey)
 	if getLastPageKey.Err() != nil {
 		if getLastPageKey.Err() == redis.Nil {
 			return false, nil
@@ -266,6 +270,8 @@ func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
 			return false, getLastPageKey.Err()
 		}
 	}
+
+	cr.client.Expire(context.TODO(), blankPageKey, cr.sortedSetClient.timeToLive)
 
 	if getLastPageKey.Val() == "1" {
 		return true, nil
@@ -281,7 +287,7 @@ func (cr *Timeline[T]) SetBlankPage(param []string) error {
 		context.TODO(),
 		lastPageKey,
 		1,
-		cr.baseClient.timeToLive,
+		cr.sortedSetClient.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
