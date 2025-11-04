@@ -424,7 +424,7 @@ func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []i
 	return fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, cr.sortedSetClient.timeToLive, processor, processorArgs, cr.relation)
 }
 
-func (cr *Timeline[T]) RequriesSeeding(param []string, totalItems int64) (bool, error) {
+func (cr *Timeline[T]) RequiresSeeding(param []string, totalItems int64) (bool, error) {
 	isBlankPage, err := cr.IsBlankPage(param)
 	if err != nil {
 		return false, err
