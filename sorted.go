@@ -160,7 +160,7 @@ func (srtd *Sorted[T]) SetBlankPage(param []string) error {
 		context.TODO(),
 		lastPageKey,
 		1,
-		srtd.baseClient.timeToLive,
+		srtd.sortedSetClient.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
