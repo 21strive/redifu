@@ -9,81 +9,25 @@ import (
 )
 
 type Segment struct {
-	*item.Foundation `json:",inline" bson:",inline"`
-	Start            float64
-	End              float64
+	redis      redis.UniversalClient
+	keyFormat  string
+	timeToLive time.Duration
 }
 
-func (segment *Segment) SetStart(start float64) {
-	segment.Start = start
+func NewSegment(redis redis.UniversalClient, keyFormat string, keyParam []string) *Segment {
+	return &Segment{}
 }
 
-func (segment *Segment) SetEnd(end float64) {
-	segment.End = end
-}
-
-func NewSegment(start float64, end float64) Segment {
-	segment := &Segment{}
-	item.InitItem(segment)
-	return *segment
-}
-
-type SegmentManager[T item.Blueprint] struct {
-	client             redis.UniversalClient
-	baseClient         *Base[Segment]
-	sortedSetClient    *SortedSet[Segment]
-	segmentDesignation string
-}
-
-func (sm *SegmentManager[T]) AddSegment(start float64, end float64) {
-	segment := NewSegment(start, end)
-	segment.SetStart(start)
-	segment.SetEnd(end)
-
-	totalItemOnSortedSet := sm.sortedSetClient.TotalItemOnSortedSet([]string{sm.segmentDesignation})
-
-	sm.baseClient.Set(segment)
-	sm.sortedSetClient.SetSortedSet([]string{sm.segmentDesignation}, float64(totalItemOnSortedSet+1), segment)
-}
-
-func (sm *SegmentManager[T]) IsWithinSegment(start float64, end float64) *Segment {
-	keySegmentList := joinParam(sm.sortedSetClient.sortedSetKeyFormat, []string{sm.segmentDesignation})
-
-	segments, errFetchSegments := sm.client.ZRange(context.TODO(), keySegmentList, 0, -1).Result()
-	if errFetchSegments != nil {
-		return nil
-	}
-
-	for _, segmentRandId := range segments {
-		segment, err := sm.baseClient.Get(segmentRandId)
-		if err != nil {
-			continue
-		}
-
-		if segment.Start <= start && segment.End >= end {
-			return &segment
-		}
-	}
+func (s *Segment) Add(lowerbound int64, upperbound int64, keyParam []string) error {
 	return nil
 }
 
-func NewSegmentManager[T item.Blueprint](client redis.UniversalClient, designation string) *SegmentManager[T] {
-	baseClient := &Base[Segment]{
-		client:        client,
-		itemKeyFormat: "segment:%s",
-	}
+func (s *Segment) Scan(lowerbound int64, upperbound int64, keyParam []string) *[][]int64 {
+	return nil
+}
 
-	sortedSetClient := &SortedSet[Segment]{
-		client:             client,
-		sortedSetKeyFormat: "segments:%s",
-	}
-
-	return &SegmentManager[T]{
-		segmentDesignation: designation,
-		client:             client,
-		baseClient:         baseClient,
-		sortedSetClient:    sortedSetClient,
-	}
+func (s *Segment) Fetch(lowerbound int64, upperbound int64, keyParam []string) *[][]int64 {
+	return nil
 }
 
 type Sorted[T item.Blueprint] struct {
