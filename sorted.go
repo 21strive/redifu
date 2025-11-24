@@ -8,26 +8,53 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type Segment struct {
-	redis      redis.UniversalClient
-	keyFormat  string
-	timeToLive time.Duration
+type Segment[T item.Blueprint] struct {
+	redis                 redis.UniversalClient
+	segmentStoreKeyFormat string
+	timeToLive            time.Duration
+	sorted                Sorted[T]
 }
 
-func NewSegment(redis redis.UniversalClient, keyFormat string, keyParam []string) *Segment {
-	return &Segment{}
+func NewSegment[T item.Blueprint](redis redis.UniversalClient, sorted *Sorted[T], segmentStoreKeyFormat string) *Segment[T] {
+	return &Segment[T]{
+		redis: redis,
+	}
 }
 
-func (s *Segment) Add(lowerbound int64, upperbound int64, keyParam []string) error {
+func (s *Segment[T]) Add(lowerbound int64, upperbound int64, segmentStoreKeyParam []string) error {
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, segmentStoreKeyParam)
+
+	zLowerBound := redis.Z{
+		Score:  float64(lowerbound),
+		Member: "L",
+	}
+	zUpperBound := redis.Z{
+		Score:  float64(upperbound),
+		Member: "U",
+	}
+
+	errSet := s.redis.ZAdd(context.TODO(), segmentStoreKey, zLowerBound, zUpperBound).Err()
+	if errSet != nil {
+		return errSet
+	}
+
 	return nil
 }
 
-func (s *Segment) Scan(lowerbound int64, upperbound int64, keyParam []string) *[][]int64 {
+func (s *Segment[T]) Scan(lowerbound int64, upperbound int64, keyParam []string) (*[][]int64, error) {
+	return nil, nil
+}
+
+func (s *Segment[T]) FindGap(lowerbound int64, upperbound int64, keyParam []string) [][]int64 {
 	return nil
 }
 
-func (s *Segment) Fetch(lowerbound int64, upperbound int64, keyParam []string) *[][]int64 {
-	return nil
+func (s *Segment[T]) Fetch(lowerbound int64, upperbound int64, keyParam []string) ([]T, error) {
+	// ambil list segment dari segmentStore
+	// ambil sorted set berdasarkan segment
+	// ambil slice sorted set ter bawah dan ter atas untuk include range yang diminta
+
+	return nil, nil
 }
 
 type Sorted[T item.Blueprint] struct {
