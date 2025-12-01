@@ -144,18 +144,24 @@ type SortedSeeder[T SQLItemBlueprint] struct {
 }
 
 func (s *SortedSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
-	return s.seedAll(query, args, keyParam, func(rows *sql.Rows) (T, error) {
+	return s.runSeed(query, args, keyParam, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
 }
 
+func (s *SortedSeeder[T]) SeedPage(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string, page int64, itemPerPage int64) error {
+	offset := (page - 1) * itemPerPage
+	adjustedQuery := query + "LIMIT " + strconv.FormatInt(page, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
+	return s.Seed(adjustedQuery, rowsScanner, args, keyParam)
+}
+
 func (s *SortedSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
-	return s.seedAll(query, args, keyParam, func(rows *sql.Rows) (T, error) {
+	return s.runSeed(query, args, keyParam, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows, s.sortedClient.relation)
 	})
 }
 
-func (s *SortedSeeder[T]) seedAll(
+func (s *SortedSeeder[T]) runSeed(
 	query string,
 	args []interface{},
 	keyParam []string,
