@@ -3,6 +3,7 @@ package redifu
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"strconv"
 )
@@ -178,6 +179,7 @@ func (s *SortedSeeder[T]) seedAll(
 	for rows.Next() {
 		item, err := scanFunc(rows)
 		if err != nil {
+			fmt.Printf("rowscanner: %s", err)
 			continue
 		}
 
