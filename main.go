@@ -86,7 +86,6 @@ func fetchAll[T item.Blueprint](
 	sortedSetClient *SortedSet[T],
 	param []string,
 	direction string,
-	timeToLive time.Duration,
 	processor func(item *T, args []interface{}),
 	processorArgs []interface{},
 	relation map[string]Relation,
@@ -159,7 +158,6 @@ func fetchAll[T item.Blueprint](
 		items = append(items, item)
 	}
 
-	redisClient.Expire(context.TODO(), sortedSetKey, timeToLive)
 	return items, nil
 }
 

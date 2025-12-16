@@ -40,15 +40,10 @@ func (cr *Base[T]) Get(param string) (T, error) {
 		return nilItem, errorUnmarshal
 	}
 
-	setExpire := cr.client.Expire(context.TODO(), key, cr.timeToLive)
-	if setExpire.Err() != nil {
-		return nilItem, setExpire.Err()
-	}
-
 	return item, nil
 }
 
-func (cr *Base[T]) Set(item T, param ...string) error {
+func (cr *Base[T]) Set(pipe redis.Pipeliner, ctx context.Context, item T, param ...string) error {
 	if len(param) > 1 {
 		return errors.New("only accept one param")
 	}
@@ -65,8 +60,8 @@ func (cr *Base[T]) Set(item T, param ...string) error {
 	}
 
 	valueAsString := string(itemInByte)
-	setRedis := cr.client.Set(
-		context.TODO(),
+	setRedis := pipe.Set(
+		ctx,
 		key,
 		valueAsString,
 		cr.timeToLive,
@@ -76,13 +71,15 @@ func (cr *Base[T]) Set(item T, param ...string) error {
 	}
 
 	if param != nil {
-		cr.DelBlank(param...)
+		cr.DelBlank(pipe, param...)
+	} else {
+		cr.DelBlank(pipe, item.GetRandId())
 	}
 
 	return nil
 }
 
-func (cr *Base[T]) Del(item T, param ...string) error {
+func (cr *Base[T]) Del(pipe redis.Pipeliner, ctx context.Context, item T, param ...string) error {
 	if len(param) > 1 {
 		return errors.New("only accept one param")
 	}
@@ -93,8 +90,8 @@ func (cr *Base[T]) Del(item T, param ...string) error {
 		key = fmt.Sprintf(cr.itemKeyFormat, item.GetRandId())
 	}
 
-	deleteRedis := cr.client.Del(
-		context.TODO(),
+	deleteRedis := pipe.Del(
+		ctx,
 		key,
 	)
 	if deleteRedis.Err() != nil {
@@ -139,11 +136,11 @@ func (cr *Base[T]) IsBlank(param ...string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Base[T]) DelBlank(param ...string) error {
+func (cr *Base[T]) DelBlank(pipe redis.Pipeliner, param ...string) error {
 	key := fmt.Sprintf(cr.itemKeyFormat, param)
 	key = key + ":blank"
 
-	delBlank := cr.client.Del(context.TODO(), key)
+	delBlank := pipe.Del(context.TODO(), key)
 	if delBlank.Err() != nil {
 		return delBlank.Err()
 	}
