@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/redis/go-redis/v9"
 	"log"
 	"strconv"
 )
@@ -15,6 +16,7 @@ type RowsScannerWithRelation[T SQLItemBlueprint] func(rows *sql.Rows, relation m
 
 type TimelineSeeder[T SQLItemBlueprint] struct {
 	db               *sql.DB
+	redis            redis.UniversalClient
 	baseClient       *Base[T]
 	paginationClient *Timeline[T]
 	scoringField     string
@@ -49,7 +51,12 @@ func (s *TimelineSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], q
 		return err
 	}
 
-	return s.baseClient.Set(item)
+	pipeCtx := context.Background()
+	pipe := s.redis.Pipeline()
+	s.baseClient.Set(pipe, pipeCtx, item)
+	_, err = pipe.Exec(pipeCtx)
+
+	return err
 }
 
 func (s *TimelineSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
@@ -105,6 +112,11 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 	defer rows.Close()
 
 	var counterLoop int64 = 0
+
+	// pipeline preparation
+	pipeCtx := context.Background()
+	pipeline := s.redis.Pipeline()
+
 	for rows.Next() {
 		item, err := scanFunc(rows)
 		if err != nil {
@@ -112,24 +124,35 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 			continue
 		}
 
-		s.baseClient.Set(item)
-		s.paginationClient.IngestItem(item, paginateParams, true)
+		s.baseClient.Set(pipeline, pipeCtx, item)
+		s.paginationClient.IngestItem(pipeline, pipeCtx, item, paginateParams, true)
 		counterLoop++
 	}
 
 	if firstPage && counterLoop == 0 {
-		s.paginationClient.SetBlankPage(paginateParams)
+		s.paginationClient.SetBlankPage(pipeline, pipeCtx, paginateParams)
 	} else if firstPage && counterLoop > 0 && counterLoop < s.paginationClient.GetItemPerPage() {
-		s.paginationClient.SetFirstPage(paginateParams)
+		s.paginationClient.SetFirstPage(pipeline, pipeCtx, paginateParams)
 	} else if !firstPage && subtraction+counterLoop < s.paginationClient.GetItemPerPage() {
-		s.paginationClient.SetLastPage(paginateParams)
+		s.paginationClient.SetLastPage(pipeline, pipeCtx, paginateParams)
+	}
+
+	if firstPage {
+		s.paginationClient.SetExpiration(pipeline, pipeCtx, paginateParams)
+	}
+
+	// pipeline execution
+	_, err = pipeline.Exec(context.TODO())
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func NewTimelineSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
+func NewTimelineSeeder[T SQLItemBlueprint](redis redis.UniversalClient, db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
 	return &TimelineSeeder[T]{
+		redis:            redis,
 		db:               db,
 		baseClient:       baseClient,
 		paginationClient: paginateClient,
@@ -138,6 +161,7 @@ func NewTimelineSeeder[T SQLItemBlueprint](db *sql.DB, baseClient *Base[T], pagi
 
 type SortedSeeder[T SQLItemBlueprint] struct {
 	db           *sql.DB
+	redis        redis.UniversalClient
 	baseClient   *Base[T]
 	sortedClient *Sorted[T]
 	scoringField string
@@ -182,6 +206,7 @@ func (s *SortedSeeder[T]) runSeed(
 	defer rows.Close()
 
 	var counterLoop int64
+	pipeline := s.redis.Pipeline()
 	for rows.Next() {
 		item, err := scanFunc(rows)
 		if err != nil {
@@ -189,24 +214,32 @@ func (s *SortedSeeder[T]) runSeed(
 			continue
 		}
 
-		s.baseClient.Set(item)
-		s.sortedClient.IngestItem(item, keyParam, true)
+		s.baseClient.Set(pipeline, item)
+		s.sortedClient.IngestItem(pipeline, item, keyParam, true)
 		counterLoop++
+	}
+	_, err = pipeline.Exec(context.TODO())
+	if err != nil {
+		return err
 	}
 
 	if counterLoop == 0 {
 		s.sortedClient.SetBlankPage(keyParam)
+	} else {
+		s.sortedClient.SetExpiration(keyParam)
 	}
 
 	return nil
 }
 
 func NewSortedSeeder[T SQLItemBlueprint](
+	redis redis.UniversalClient,
 	db *sql.DB,
 	baseClient *Base[T],
 	sortedClient *Sorted[T],
 ) *SortedSeeder[T] {
 	return &SortedSeeder[T]{
+		redis:        redis,
 		db:           db,
 		baseClient:   baseClient,
 		sortedClient: sortedClient,

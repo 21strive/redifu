@@ -2,6 +2,7 @@ package redifu
 
 import (
 	"context"
+	"errors"
 	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 	"time"
@@ -13,6 +14,7 @@ type Sorted[T item.Blueprint] struct {
 	sortedSetClient  *SortedSet[T]
 	sortingReference string
 	relation         map[string]Relation
+	timeToLive       time.Duration
 }
 
 func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T]) {
@@ -36,11 +38,32 @@ func (srtd *Sorted[T]) SetSortingReference(sortingReference string) {
 	srtd.sortingReference = sortingReference
 }
 
-func (srtd *Sorted[T]) AddItem(item T, sortedSetParam []string) {
-	srtd.IngestItem(item, sortedSetParam, false)
+func (srtd *Sorted[T]) AddItem(item T, sortedSetParam []string) error {
+	_, errGet := srtd.baseClient.Get(item.GetRandId())
+	if errGet != nil && errGet != redis.Nil {
+		return errGet
+	}
+
+	pipeCtx := context.Background()
+	pipe := srtd.client.Pipeline()
+
+	if errors.Is(errGet, redis.Nil) {
+		errSet := srtd.baseClient.Set(pipe, pipeCtx, item)
+		if errSet != nil {
+			return errSet
+		}
+	}
+
+	errIngest := srtd.IngestItem(pipe, pipeCtx, item, sortedSetParam, false)
+	if errIngest != nil {
+		return errIngest
+	}
+
+	_, errPipe := pipe.Exec(pipeCtx)
+	return errPipe
 }
 
-func (srtd *Sorted[T]) IngestItem(item T, sortedSetParam []string, seed bool) error {
+func (srtd *Sorted[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, sortedSetParam []string, seed bool) error {
 	score, err := getItemScore(item, srtd.sortingReference)
 	if err != nil {
 		return err
@@ -52,36 +75,46 @@ func (srtd *Sorted[T]) IngestItem(item T, sortedSetParam []string, seed bool) er
 			return errGet
 		}
 		if isBlankPage {
-			srtd.DelBlankPage(sortedSetParam)
+			srtd.DelBlankPage(pipe, pipeCtx, sortedSetParam)
 		}
 
 		if srtd.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) > 0 {
-			return srtd.sortedSetClient.SetSortedSet(sortedSetParam, score, item)
+			return srtd.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
 		}
 	} else {
-		return srtd.sortedSetClient.SetSortedSet(sortedSetParam, score, item)
+		return srtd.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
 	}
 
 	return nil
 }
 
+func (srtd *Sorted[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, sortedSetParam []string) error {
+	return srtd.sortedSetClient.SetExpiration(pipe, pipeCtx, sortedSetParam, srtd.timeToLive)
+}
+
 func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
-	return srtd.sortedSetClient.DeleteFromSortedSet(sortedSetParam, item)
+	pipe := srtd.client.Pipeline()
+	errDel := srtd.sortedSetClient.DeleteFromSortedSet(pipe, context.Background(), sortedSetParam, item)
+	if errDel != nil {
+		return errDel
+	}
+	_, errPipe := pipe.Exec(context.Background())
+	return errPipe
 }
 
 func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, srtd.baseClient.timeToLive, processor, processorArgs, srtd.relation)
+	return fetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, processor, processorArgs, srtd.relation)
 }
 
-func (srtd *Sorted[T]) SetBlankPage(param []string) error {
+func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) error {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
-	setLastPageKey := srtd.client.Set(
-		context.TODO(),
+	setLastPageKey := pipe.Set(
+		pipeCtx,
 		lastPageKey,
 		1,
-		srtd.sortedSetClient.timeToLive,
+		srtd.timeToLive,
 	)
 
 	if setLastPageKey.Err() != nil {
@@ -90,11 +123,11 @@ func (srtd *Sorted[T]) SetBlankPage(param []string) error {
 	return nil
 }
 
-func (srtd *Sorted[T]) DelBlankPage(param []string) error {
+func (srtd *Sorted[T]) DelBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) error {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
-	delLastPageKey := srtd.client.Del(context.TODO(), lastPageKey)
+	delLastPageKey := pipe.Del(pipeCtx, lastPageKey)
 	if delLastPageKey.Err() != nil {
 		return delLastPageKey.Err()
 	}
@@ -137,35 +170,40 @@ func (srtd *Sorted[T]) RequiresSeeding(param []string) (bool, error) {
 }
 
 func (srtd *Sorted[T]) RemoveSorted(param []string) error {
-	err := srtd.sortedSetClient.DeleteSortedSet(param)
+	pipe := srtd.client.Pipeline()
+	err := srtd.sortedSetClient.DeleteSortedSet(pipe, context.Background(), param)
 	if err != nil {
 		return err
 	}
-
-	return nil
+	_, errPipe := pipe.Exec(context.Background())
+	return errPipe
 }
 
 func (srtd *Sorted[T]) PurgeSorted(param []string) error {
+	pipeCtx := context.Background()
+	pipe := srtd.client.Pipeline()
+
 	items, err := srtd.Fetch(param, Descending, nil, nil)
 	if err != nil {
 		return err
 	}
 
 	for _, item := range items {
-		srtd.baseClient.Del(item)
+		srtd.baseClient.Del(pipe, pipeCtx, item)
 	}
 
-	err = srtd.sortedSetClient.DeleteSortedSet(param)
+	err = srtd.sortedSetClient.DeleteSortedSet(pipe, pipeCtx, param)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	_, errPipe := pipe.Exec(pipeCtx)
+	return errPipe
 }
 
 func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) *Sorted[T] {
 	sortedSetClient := &SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat, timeToLive)
+	sortedSetClient.Init(client, keyFormat)
 
 	sorted := &Sorted[T]{}
 	sorted.Init(client, baseClient, sortedSetClient)
@@ -174,7 +212,7 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[
 
 func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, sortingReference string, timeToLive time.Duration) *Sorted[T] {
 	sortedSetClient := &SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat, timeToLive)
+	sortedSetClient.Init(client, keyFormat)
 
 	sorted := &Sorted[T]{}
 	sorted.Init(client, baseClient, sortedSetClient)

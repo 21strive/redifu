@@ -12,16 +12,14 @@ import (
 type SortedSet[T item.Blueprint] struct {
 	client             redis.UniversalClient
 	sortedSetKeyFormat string
-	timeToLive         time.Duration
 }
 
-func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) {
+func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat string) {
 	cr.client = client
 	cr.sortedSetKeyFormat = sortedSetKeyFormat
-	cr.timeToLive = timeToLive
 }
 
-func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) error {
+func (cr *SortedSet[T]) SetSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, score float64, item T) error {
 	var key string
 	if param == nil {
 		key = cr.sortedSetKeyFormat
@@ -34,18 +32,29 @@ func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) erro
 		Member: item.GetRandId(),
 	}
 
-	setSortedSet := cr.client.ZAdd(
-		context.TODO(),
+	setSortedSet := pipe.ZAdd(
+		ctx,
 		key,
 		sortedSetMember)
 	if setSortedSet.Err() != nil {
 		return setSortedSet.Err()
 	}
 
-	setExpire := cr.client.Expire(
-		context.TODO(),
+	return nil
+}
+
+func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context, param []string, timeToLive time.Duration) error {
+	var key string
+	if param == nil {
+		key = cr.sortedSetKeyFormat
+	} else {
+		key = joinParam(cr.sortedSetKeyFormat, param)
+	}
+
+	setExpire := pipe.Expire(
+		ctx,
 		key,
-		cr.timeToLive,
+		timeToLive,
 	)
 	if !setExpire.Val() {
 		return setExpire.Err()
@@ -54,11 +63,11 @@ func (cr *SortedSet[T]) SetSortedSet(param []string, score float64, item T) erro
 	return nil
 }
 
-func (cr *SortedSet[T]) DeleteFromSortedSet(param []string, item T) error {
+func (cr *SortedSet[T]) DeleteFromSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, item T) error {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
-	removeFromSortedSet := cr.client.ZRem(
-		context.TODO(),
+	removeFromSortedSet := pipe.ZRem(
+		ctx,
 		key,
 		item.GetRandId(),
 	)
@@ -80,10 +89,10 @@ func (cr *SortedSet[T]) TotalItemOnSortedSet(param []string) int64 {
 	return getTotalItemSortedSet.Val()
 }
 
-func (cr *SortedSet[T]) DeleteSortedSet(param []string) error {
+func (cr *SortedSet[T]) DeleteSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string) error {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
-	removeSortedSet := cr.client.Del(context.TODO(), key)
+	removeSortedSet := pipe.Del(ctx, key)
 	if removeSortedSet.Err() != nil {
 		return removeSortedSet.Err()
 	}
@@ -123,6 +132,6 @@ func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
 
 func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) *SortedSet[T] {
 	sorted := &SortedSet[T]{}
-	sorted.Init(client, sortedSetKeyFormat, timeToLive)
+	sorted.Init(client, sortedSetKeyFormat)
 	return sorted
 }
