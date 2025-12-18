@@ -3,9 +3,7 @@ package redifu
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"github.com/redis/go-redis/v9"
-	"log"
 	"strconv"
 )
 
@@ -120,8 +118,7 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 	for rows.Next() {
 		item, err := scanFunc(rows)
 		if err != nil {
-			log.Printf("rowscanner: %s", err)
-			continue
+			return err
 		}
 
 		s.baseClient.Set(pipeline, pipeCtx, item)
@@ -215,10 +212,9 @@ func (s *SortedSeeder[T]) runSeed(
 	pipeline := s.redis.Pipeline()
 
 	for rows.Next() {
-		item, err := scanFunc(rows)
-		if err != nil {
-			fmt.Printf("rowscanner: %s", err)
-			continue
+		item, errScan := scanFunc(rows)
+		if errScan != nil {
+			return errScan
 		}
 
 		s.baseClient.Set(pipeline, pipeCtx, item)
@@ -226,11 +222,6 @@ func (s *SortedSeeder[T]) runSeed(
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
-		return err
-	}
-
-	_, err = pipeline.Exec(context.TODO())
-	if err != nil {
 		return err
 	}
 

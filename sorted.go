@@ -17,10 +17,11 @@ type Sorted[T item.Blueprint] struct {
 	timeToLive       time.Duration
 }
 
-func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T]) {
+func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], timeToLive time.Duration) {
 	srtd.client = client
 	srtd.baseClient = baseClient
 	srtd.sortedSetClient = sortedSetClient
+	srtd.timeToLive = timeToLive
 }
 
 func (cr *Sorted[T]) AddRelation(identifier string, relationBase Relation) {
@@ -79,17 +80,17 @@ func (srtd *Sorted[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context,
 		}
 
 		if srtd.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) > 0 {
-			return srtd.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
+			srtd.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
 		}
 	} else {
-		return srtd.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
+		srtd.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
 	}
 
 	return nil
 }
 
-func (srtd *Sorted[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, sortedSetParam []string) error {
-	return srtd.sortedSetClient.SetExpiration(pipe, pipeCtx, sortedSetParam, srtd.timeToLive)
+func (srtd *Sorted[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, sortedSetParam []string) {
+	srtd.sortedSetClient.SetExpiration(pipe, pipeCtx, sortedSetParam, srtd.timeToLive)
 }
 
 func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
@@ -115,16 +116,13 @@ func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Contex
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
-	setLastPageKey := pipe.Set(
+	pipe.Set(
 		pipeCtx,
 		lastPageKey,
 		1,
 		srtd.timeToLive,
 	)
 
-	if setLastPageKey.Err() != nil {
-		return setLastPageKey.Err()
-	}
 	return nil
 }
 
@@ -132,10 +130,7 @@ func (srtd *Sorted[T]) DelBlankPage(pipe redis.Pipeliner, pipeCtx context.Contex
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
-	delLastPageKey := pipe.Del(pipeCtx, lastPageKey)
-	if delLastPageKey.Err() != nil {
-		return delLastPageKey.Err()
-	}
+	pipe.Del(pipeCtx, lastPageKey)
 	return nil
 }
 
@@ -211,7 +206,7 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[
 	sortedSetClient.Init(client, keyFormat)
 
 	sorted := &Sorted[T]{}
-	sorted.Init(client, baseClient, sortedSetClient)
+	sorted.Init(client, baseClient, sortedSetClient, timeToLive)
 	return sorted
 }
 
@@ -220,7 +215,7 @@ func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, base
 	sortedSetClient.Init(client, keyFormat)
 
 	sorted := &Sorted[T]{}
-	sorted.Init(client, baseClient, sortedSetClient)
+	sorted.Init(client, baseClient, sortedSetClient, timeToLive)
 	sorted.SetSortingReference(sortingReference)
 	return sorted
 }

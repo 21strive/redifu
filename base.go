@@ -60,15 +60,12 @@ func (cr *Base[T]) Set(pipe redis.Pipeliner, ctx context.Context, item T, param 
 	}
 
 	valueAsString := string(itemInByte)
-	setRedis := pipe.Set(
+	pipe.Set(
 		ctx,
 		key,
 		valueAsString,
 		cr.timeToLive,
 	)
-	if setRedis.Err() != nil {
-		return setRedis.Err()
-	}
 
 	if param != nil {
 		cr.DelBlank(pipe, param...)
@@ -147,15 +144,11 @@ func (cr *Base[T]) IsBlank(param ...string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Base[T]) DelBlank(pipe redis.Pipeliner, param ...string) error {
+func (cr *Base[T]) DelBlank(pipe redis.Pipeliner, param ...string) {
 	key := fmt.Sprintf(cr.itemKeyFormat, param)
 	key = key + ":blank"
 
-	delBlank := pipe.Del(context.TODO(), key)
-	if delBlank.Err() != nil {
-		return delBlank.Err()
-	}
-	return nil
+	pipe.Del(context.TODO(), key)
 }
 
 func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *Base[T] {

@@ -19,7 +19,7 @@ func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat st
 	cr.sortedSetKeyFormat = sortedSetKeyFormat
 }
 
-func (cr *SortedSet[T]) SetSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, score float64, item T) error {
+func (cr *SortedSet[T]) SetSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, score float64, item T) {
 	var key string
 	if param == nil {
 		key = cr.sortedSetKeyFormat
@@ -32,18 +32,15 @@ func (cr *SortedSet[T]) SetSortedSet(pipe redis.Pipeliner, ctx context.Context, 
 		Member: item.GetRandId(),
 	}
 
-	setSortedSet := pipe.ZAdd(
+	fmt.Printf("ZAdd key: %s, score: %f, member: %v\n", key, score, sortedSetMember.Member)
+
+	pipe.ZAdd(
 		ctx,
 		key,
 		sortedSetMember)
-	if setSortedSet.Err() != nil {
-		return setSortedSet.Err()
-	}
-
-	return nil
 }
 
-func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context, param []string, timeToLive time.Duration) error {
+func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context, param []string, timeToLive time.Duration) {
 	var key string
 	if param == nil {
 		key = cr.sortedSetKeyFormat
@@ -51,16 +48,11 @@ func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context,
 		key = joinParam(cr.sortedSetKeyFormat, param)
 	}
 
-	setExpire := pipe.Expire(
+	pipe.Expire(
 		ctx,
 		key,
 		timeToLive,
 	)
-	if !setExpire.Val() {
-		return setExpire.Err()
-	}
-
-	return nil
 }
 
 func (cr *SortedSet[T]) DeleteFromSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, item T) error {
