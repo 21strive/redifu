@@ -39,9 +39,9 @@ func (p *Page[T]) IsPageBlank(param []string, page int64) (bool, error) {
 	return p.sorted.IsBlankPage(param)
 }
 
-func (p *Page[T]) SetPageBlank(param []string, page int64) error {
+func (p *Page[T]) SetPageBlank(pipe redis.Pipeliner, pipeCtx context.Context, param []string, page int64) error {
 	param = append(param, strconv.FormatInt(page, 10))
-	return p.sorted.SetBlankPage(param)
+	return p.sorted.SetBlankPage(pipe, pipeCtx, param)
 }
 
 func (p *Page[T]) AddPage(param []string, page int64) error {

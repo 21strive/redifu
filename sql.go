@@ -128,6 +128,9 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 		s.paginationClient.IngestItem(pipeline, pipeCtx, item, paginateParams, true)
 		counterLoop++
 	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
 
 	if firstPage && counterLoop == 0 {
 		s.paginationClient.SetBlankPage(pipeline, pipeCtx, paginateParams)
@@ -206,7 +209,11 @@ func (s *SortedSeeder[T]) runSeed(
 	defer rows.Close()
 
 	var counterLoop int64
+
+	// pipeline preparation
+	pipeCtx := context.Background()
 	pipeline := s.redis.Pipeline()
+
 	for rows.Next() {
 		item, err := scanFunc(rows)
 		if err != nil {
@@ -214,22 +221,27 @@ func (s *SortedSeeder[T]) runSeed(
 			continue
 		}
 
-		s.baseClient.Set(pipeline, item)
-		s.sortedClient.IngestItem(pipeline, item, keyParam, true)
+		s.baseClient.Set(pipeline, pipeCtx, item)
+		s.sortedClient.IngestItem(pipeline, pipeCtx, item, keyParam, true)
 		counterLoop++
 	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
 	_, err = pipeline.Exec(context.TODO())
 	if err != nil {
 		return err
 	}
 
 	if counterLoop == 0 {
-		s.sortedClient.SetBlankPage(keyParam)
+		s.sortedClient.SetBlankPage(pipeline, pipeCtx, keyParam)
 	} else {
-		s.sortedClient.SetExpiration(keyParam)
+		s.sortedClient.SetExpiration(pipeline, pipeCtx, keyParam)
 	}
 
-	return nil
+	_, errPipe := pipeline.Exec(pipeCtx)
+	return errPipe
 }
 
 func NewSortedSeeder[T SQLItemBlueprint](

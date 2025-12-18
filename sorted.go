@@ -94,6 +94,11 @@ func (srtd *Sorted[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Conte
 
 func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 	pipe := srtd.client.Pipeline()
+	errDelBase := srtd.baseClient.Del(pipe, context.Background(), item)
+	if errDelBase != nil {
+		return errDelBase
+	}
+
 	errDel := srtd.sortedSetClient.DeleteFromSortedSet(pipe, context.Background(), sortedSetParam, item)
 	if errDel != nil {
 		return errDel
