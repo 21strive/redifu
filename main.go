@@ -192,7 +192,17 @@ func (r *RelationFormat[T]) SetItem(item interface{}) error {
 	if !ok {
 		return fmt.Errorf("invalid item type: expected %T, got %T", *new(T), item)
 	}
-	return r.base.Set(typedItem)
+
+	pipeCtx := context.Background()
+	pipe := r.base.client.Pipeline()
+
+	errSet := r.base.Set(pipe, pipeCtx, typedItem)
+	if errSet != nil {
+		return errSet
+	}
+
+	_, errPipe := pipe.Exec(pipeCtx)
+	return errPipe
 }
 
 func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {

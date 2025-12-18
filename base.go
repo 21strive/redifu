@@ -79,6 +79,17 @@ func (cr *Base[T]) Set(pipe redis.Pipeliner, ctx context.Context, item T, param 
 	return nil
 }
 
+func (cr *Base[T]) Upsert(item T, param ...string) error {
+	pipeCtx := context.Background()
+	pipeline := cr.client.Pipeline()
+	errSet := cr.Set(pipeline, pipeCtx, item, param...)
+	if errSet != nil {
+		return errSet
+	}
+	_, errPipe := pipeline.Exec(pipeCtx)
+	return errPipe
+}
+
 func (cr *Base[T]) Del(pipe redis.Pipeliner, ctx context.Context, item T, param ...string) error {
 	if len(param) > 1 {
 		return errors.New("only accept one param")

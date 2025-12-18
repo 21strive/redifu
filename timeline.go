@@ -152,6 +152,11 @@ func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 	pipeCtx := context.Background()
 	pipe := cr.client.Pipeline()
 
+	errDelBase := cr.baseClient.Del(pipe, pipeCtx, item)
+	if errDelBase != nil {
+		return errDelBase
+	}
+
 	err := cr.sortedSetClient.DeleteFromSortedSet(pipe, pipeCtx, param, item)
 	if err != nil {
 		return err
