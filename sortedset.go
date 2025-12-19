@@ -32,8 +32,6 @@ func (cr *SortedSet[T]) SetSortedSet(pipe redis.Pipeliner, ctx context.Context, 
 		Member: item.GetRandId(),
 	}
 
-	fmt.Printf("ZAdd key: %s, score: %f, member: %v\n", key, score, sortedSetMember.Member)
-
 	pipe.ZAdd(
 		ctx,
 		key,

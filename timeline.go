@@ -10,6 +10,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var ResetPagination = errors.New("reset pagination")
+
 type Timeline[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
@@ -239,8 +241,6 @@ func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
 		}
 	}
 
-	cr.client.Expire(context.TODO(), lastPageKey, cr.timeToLive)
-
 	if getLastPageKey.Val() == "1" {
 		return true, nil
 	}
@@ -278,8 +278,6 @@ func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
 			return false, getLastPageKey.Err()
 		}
 	}
-
-	cr.client.Expire(context.TODO(), blankPageKey, cr.timeToLive)
 
 	if getLastPageKey.Val() == "1" {
 		return true, nil
@@ -326,6 +324,14 @@ func (cr *Timeline[T]) Fetch(
 	stop := cr.itemPerPage - 1
 
 	for i := len(lastRandIds) - 1; i >= 0; i-- {
+		count, errZCard := cr.client.ZCard(context.TODO(), sortedSetKey).Result()
+		if errZCard != nil {
+			return nil, validLastRandId, position, errZCard
+		}
+		if count == 0 {
+			return nil, validLastRandId, position, ResetPagination
+		}
+
 		item, err := cr.baseClient.Get(lastRandIds[i])
 		if err != nil {
 			continue
@@ -422,6 +428,24 @@ func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []i
 }
 
 func (cr *Timeline[T]) RequiresSeeding(param []string, totalItems int64) (bool, error) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+	count, errZCard := cr.client.ZCard(context.TODO(), sortedSetKey).Result()
+	if errZCard != nil {
+		return false, errZCard
+	}
+	if count == 0 {
+		pipeCtx := context.Background()
+		pipeline := cr.client.Pipeline()
+
+		cr.DelLastPage(pipeline, pipeCtx, param)
+		cr.DelFirstPage(pipeline, pipeCtx, param)
+
+		_, errPipe := pipeline.Exec(pipeCtx)
+		if errPipe != nil {
+			return false, errPipe
+		}
+	}
+
 	isBlankPage, err := cr.IsBlankPage(param)
 	if err != nil {
 		return false, err
