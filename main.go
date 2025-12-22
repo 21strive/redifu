@@ -151,7 +151,7 @@ func fetchAll[T item.Blueprint](
 
 		if relation != nil {
 			for _, relationFormat := range relation {
-				v := reflect.ValueOf(&item)
+				v := reflect.ValueOf(item)
 
 				if v.Kind() == reflect.Ptr {
 					v = v.Elem()

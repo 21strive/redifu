@@ -172,23 +172,12 @@ type SortedSeeder[T SQLItemBlueprint] struct {
 	redis        redis.UniversalClient
 	baseClient   *Base[T]
 	sortedClient *Sorted[T]
-	scoringField string
-}
-
-func (s *SortedSeeder[T]) SetScoringField(scoringField string) {
-	s.scoringField = scoringField
 }
 
 func (s *SortedSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
 	return s.runSeed(query, args, keyParam, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
-}
-
-func (s *SortedSeeder[T]) SeedPage(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string, page int64, itemPerPage int64) error {
-	offset := (page - 1) * itemPerPage
-	adjustedQuery := query + "LIMIT " + strconv.FormatInt(page, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
-	return s.Seed(adjustedQuery, rowsScanner, args, keyParam)
 }
 
 func (s *SortedSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
@@ -258,5 +247,91 @@ func NewSortedSeeder[T SQLItemBlueprint](
 		db:           db,
 		baseClient:   baseClient,
 		sortedClient: sortedClient,
+	}
+}
+
+type PageSeeder[T SQLItemBlueprint] struct {
+	redis      redis.UniversalClient
+	db         *sql.DB
+	baseClient *Base[T]
+	pageClient *Page[T]
+}
+
+func (p *PageSeeder[T]) Seed(query string, page int64, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
+	offset := (page - 1) * p.pageClient.itemPerPage
+	adjustedQuery := query + "LIMIT " + strconv.FormatInt(page, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
+	return p.runSeed(adjustedQuery, args, page, keyParam, func(rows *sql.Rows) (T, error) { return rowsScanner(rows) })
+}
+
+func (p *PageSeeder[T]) SeedWithRelation(query string, page int64, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
+	offset := (page - 1) * p.pageClient.itemPerPage
+	adjustedQuery := query + "LIMIT " + strconv.FormatInt(page, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
+	return p.runSeed(adjustedQuery, args, page, keyParam, func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows, p.pageClient.relation)
+	})
+}
+
+func (p *PageSeeder[T]) runSeed(
+	query string,
+	args []interface{},
+	page int64,
+	keyParam []string,
+	scanFunc func(*sql.Rows) (T, error),
+) error {
+	if p.db == nil {
+		return NoDatabaseProvided
+	}
+
+	if scanFunc == nil {
+		return QueryOrScannerNotConfigured
+	}
+
+	rows, err := p.db.QueryContext(context.TODO(), query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var counterLoop int64
+
+	// pipeline preparation
+	pipeCtx := context.Background()
+	pipeline := p.redis.Pipeline()
+
+	for rows.Next() {
+		item, errScan := scanFunc(rows)
+		if errScan != nil {
+			return errScan
+		}
+
+		p.baseClient.Set(pipeline, pipeCtx, item)
+		p.pageClient.IngestItem(pipeline, pipeCtx, item, page, keyParam)
+		counterLoop++
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
+	if counterLoop == 0 {
+		p.pageClient.SetBlankPage(pipeline, pipeCtx, page, keyParam)
+	} else {
+		p.pageClient.SetExpiration(pipeline, pipeCtx, page, keyParam)
+	}
+
+	_, errPipe := pipeline.Exec(pipeCtx)
+	return errPipe
+}
+
+func NewPageSeeder[T SQLItemBlueprint](
+	redisClient redis.UniversalClient,
+	db *sql.DB,
+	baseClient *Base[T],
+	pageClient *Page[T],
+) *PageSeeder[T] {
+	return &PageSeeder[T]{
+		redis:      redisClient,
+		db:         db,
+		baseClient: baseClient,
+		pageClient: pageClient,
 	}
 }

@@ -14,7 +14,26 @@ type Page[T item.Blueprint] struct {
 	sorted             *Sorted[T]
 	direction          string
 	processor          func(item *T, args []interface{})
+	relation           map[string]Relation
 	itemPerPage        int64
+}
+
+func (p *Page[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedClient *Sorted[T], pageIndexKeyFormat string) {
+}
+
+func (p *Page[T]) SetSortingReference(sortingReference string) {
+	p.sorted.SetSortingReference(sortingReference)
+}
+
+func (p *Page[T]) AddRelation(identifier string, relationBase Relation) {
+	if p.relation == nil {
+		p.relation = make(map[string]Relation)
+	}
+	p.relation[identifier] = relationBase
+}
+
+func (p *Page[T]) GetRelation() map[string]Relation {
+	return p.relation
 }
 
 func (p *Page[T]) SetItemPerPage(itemPerPage int64) {
@@ -39,24 +58,27 @@ func (p *Page[T]) IsPageBlank(param []string, page int64) (bool, error) {
 	return p.sorted.IsBlankPage(param)
 }
 
-func (p *Page[T]) SetPageBlank(pipe redis.Pipeliner, pipeCtx context.Context, param []string, page int64) error {
+func (p *Page[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
 	param = append(param, strconv.FormatInt(page, 10))
-	return p.sorted.SetBlankPage(pipe, pipeCtx, param)
+	p.sorted.SetBlankPage(pipe, pipeCtx, param)
 }
 
-func (p *Page[T]) AddPage(param []string, page int64) error {
+func (p *Page[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
+	param = append(param, strconv.FormatInt(page, 10))
+	p.sorted.SetExpiration(pipe, pipeCtx, param)
+}
+
+func (p *Page[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, page int64, param []string) {
+	param = append(param, strconv.FormatInt(page, 10))
+	p.sorted.IngestItem(pipe, pipeCtx, item, param, true)
+
 	key := joinParam(p.pageIndexKeyFormat, param)
 	member := redis.Z{
 		Score:  float64(page),
 		Member: strconv.FormatInt(page, 10),
 	}
 
-	errAdd := p.client.ZAdd(context.TODO(), key, member)
-	if errAdd.Err() != nil {
-		return errAdd.Err()
-	}
-
-	return nil
+	pipe.ZAdd(pipeCtx, key, member)
 }
 
 func (p *Page[T]) PurgeAll(param []string) error {
@@ -85,7 +107,7 @@ func (p *Page[T]) PurgeAll(param []string) error {
 
 func NewPage[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) *Page[T] {
 	adjustedKeyFormat := keyFormat + ":page:%s"
-	pageIndexKeyFormat := keyFormat + ":pageindex"
+	pageIndexKeyFormat := keyFormat + ":page-index"
 	sorted := NewSorted[T](client, baseClient, adjustedKeyFormat, timeToLive)
 
 	return &Page[T]{
