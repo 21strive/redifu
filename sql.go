@@ -21,6 +21,10 @@ type TimelineSeeder[T SQLItemBlueprint] struct {
 	scoringField     string
 }
 
+func (s *TimelineSeeder[T]) SetSortingReference(scoringField string) {
+	s.scoringField = scoringField
+}
+
 func (s *TimelineSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) (T, error) {
 	var item T
 	if s.db == nil {
@@ -169,6 +173,10 @@ type SortedSeeder[T SQLItemBlueprint] struct {
 	baseClient   *Base[T]
 	sortedClient *Sorted[T]
 	scoringField string
+}
+
+func (s *SortedSeeder[T]) SetScoringField(scoringField string) {
+	s.scoringField = scoringField
 }
 
 func (s *SortedSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
