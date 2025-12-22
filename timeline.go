@@ -372,7 +372,7 @@ func (cr *Timeline[T]) Fetch(
 
 		if cr.relation != nil {
 			for _, relationFormat := range cr.relation {
-				v := reflect.ValueOf(&item)
+				v := reflect.ValueOf(item)
 
 				if v.Kind() == reflect.Ptr {
 					v = v.Elem()

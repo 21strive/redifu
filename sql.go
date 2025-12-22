@@ -3,6 +3,7 @@ package redifu
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"github.com/redis/go-redis/v9"
 	"strconv"
 )
@@ -81,9 +82,12 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 		firstPage = true
 		queryToUse = firstPageQuery
 	} else {
-		reference, err := s.FindOne(rowQuery, rowScanner, []interface{}{lastRandId})
-		if err != nil {
-			return DocumentOrReferencesNotFound
+		reference, errFindReference := s.FindOne(rowQuery, rowScanner, []interface{}{lastRandId})
+		if errFindReference != nil {
+			if errors.Is(errFindReference, sql.ErrNoRows) {
+				return DocumentOrReferencesNotFound
+			}
+			return errFindReference
 		} else {
 			firstPage = false
 			queryToUse = nextPageQuery

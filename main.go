@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
+	"math"
 	"reflect"
+	"strings"
 	"time"
 )
 
@@ -66,9 +68,39 @@ func getItemScore[T item.Blueprint](item T, sortingReference string) (float64, e
 		return float64(field.Interface().(*time.Time).UnixMilli()), nil
 	case reflect.TypeOf(int64(0)):
 		return float64(field.Interface().(int64)), nil
+	case reflect.TypeOf((*string)(nil)):
+		if field.IsNil() {
+			return 0, errors.New("getItemScore: string field is nil")
+		}
+		return stringToScore(*field.Interface().(*string)), nil
 	default:
 		return 0, fmt.Errorf("getItemScore: field %s is not a time.Time", sortingReference)
 	}
+}
+
+func stringToScore(s string) float64 {
+	if s == "" {
+		return 0
+	}
+
+	// Normalize to lowercase for case-insensitive sorting
+	s = strings.ToLower(s)
+
+	var score float64
+	maxChars := 8 // Limit to prevent overflow
+
+	for i, r := range s {
+		if i >= maxChars {
+			break
+		}
+		// Each character position has decreasing significance
+		// Position 0: multiplied by 1e15
+		// Position 1: multiplied by 1e12
+		// etc.
+		score += float64(r) * math.Pow(1000, float64(maxChars-i-1))
+	}
+
+	return score
 }
 
 func joinParam(keyFormat string, param []string) string {
@@ -193,16 +225,7 @@ func (r *RelationFormat[T]) SetItem(item interface{}) error {
 		return fmt.Errorf("invalid item type: expected %T, got %T", *new(T), item)
 	}
 
-	pipeCtx := context.Background()
-	pipe := r.base.client.Pipeline()
-
-	errSet := r.base.Set(pipe, pipeCtx, typedItem)
-	if errSet != nil {
-		return errSet
-	}
-
-	_, errPipe := pipe.Exec(pipeCtx)
-	return errPipe
+	return r.base.Upsert(typedItem)
 }
 
 func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {
