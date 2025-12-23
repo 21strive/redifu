@@ -1,11 +1,9 @@
 package redifu
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"github.com/21strive/item"
-	"github.com/redis/go-redis/v9"
 	"math"
 	"reflect"
 	"strings"
@@ -110,86 +108,6 @@ func joinParam(keyFormat string, param []string) string {
 	}
 	sortedSetKey := fmt.Sprintf(keyFormat, interfaces...)
 	return sortedSetKey
-}
-
-func fetchSorted[T item.Blueprint](
-	redisClient redis.UniversalClient,
-	baseClient *Base[T],
-	sortedSetClient *SortedSet[T],
-	param []string,
-	direction string,
-	processor func(item *T, args []interface{}),
-	processorArgs []interface{},
-	relation map[string]Relation,
-) ([]T, error) {
-	var items []T
-
-	if direction == "" {
-		return nil, errors.New("must set direction!")
-	}
-
-	sortedSetKey := joinParam(sortedSetClient.sortedSetKeyFormat, param)
-
-	var result *redis.StringSliceCmd
-	if direction == Descending {
-		result = redisClient.ZRevRange(context.TODO(), sortedSetKey, 0, -1)
-	} else {
-		result = redisClient.ZRange(context.TODO(), sortedSetKey, 0, -1)
-	}
-
-	if result.Err() != nil {
-		return nil, result.Err()
-	}
-	listRandIds := result.Val()
-
-	for i := 0; i < len(listRandIds); i++ {
-		item, err := baseClient.Get(listRandIds[i])
-		if err != nil {
-			continue
-		}
-
-		if relation != nil {
-			for _, relationFormat := range relation {
-				v := reflect.ValueOf(item)
-
-				if v.Kind() == reflect.Ptr {
-					v = v.Elem()
-				}
-
-				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
-				if !relationRandIdField.IsValid() {
-					continue
-				}
-
-				relationRandId := relationRandIdField.String()
-				if relationRandId == "" {
-					continue
-				}
-
-				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
-				if errGet != nil {
-					continue
-				}
-
-				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
-				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
-					continue
-				}
-
-				relationAttrField.Set(reflect.ValueOf(relationItem))
-				if relationRandIdField.CanSet() {
-					relationRandIdField.SetString("")
-				}
-			}
-		}
-		if processor != nil {
-			processor(&item, processorArgs)
-		}
-
-		items = append(items, item)
-	}
-
-	return items, nil
 }
 
 type Relation interface {

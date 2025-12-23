@@ -109,7 +109,11 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 }
 
 func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchSorted[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, processor, processorArgs, srtd.relation)
+	return srtd.sortedSetClient.Fetch(srtd.baseClient, param, direction, processor, processorArgs, srtd.relation, 0, -1, false)
+}
+
+func (srtd *Sorted[T]) FetchByScore(param []string, direction string, lowerBound int64, uppeBound int64, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
+	return srtd.sortedSetClient.Fetch(srtd.baseClient, param, direction, processor, processorArgs, srtd.relation, lowerBound, uppeBound, true)
 }
 
 func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) {
@@ -205,15 +209,5 @@ func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[
 
 	sorted := &Sorted[T]{}
 	sorted.Init(client, baseClient, sortedSetClient, timeToLive)
-	return sorted
-}
-
-func NewSortedWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, sortingReference string, timeToLive time.Duration) *Sorted[T] {
-	sortedSetClient := &SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat)
-
-	sorted := &Sorted[T]{}
-	sorted.Init(client, baseClient, sortedSetClient, timeToLive)
-	sorted.SetSortingReference(sortingReference)
 	return sorted
 }

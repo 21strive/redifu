@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/redis/go-redis/v9"
 	"strconv"
+	"time"
 )
 
 type RowScanner[T SQLItemBlueprint] func(row *sql.Row) (T, error)
@@ -62,19 +63,19 @@ func (s *TimelineSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], q
 	return err
 }
 
-func (s *TimelineSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScanner RowsScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
-	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
+func (s *TimelineSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], rowsScanner RowsScanner[T]) error {
+	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
 }
 
-func (s *TimelineSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string) error {
-	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, rowScanner, queryArgs, subtraction, lastRandId, paginateParams, func(rows *sql.Rows) (T, error) {
+func (s *TimelineSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T]) error {
+	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
 		return rowsScannerWithJoin(rows, s.paginationClient.relation)
 	})
 }
 
-func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, nextPageQuery string, rowScanner RowScanner[T], queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, scanFunc func(*sql.Rows) (T, error)) error {
+func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], scanFunc func(*sql.Rows) (T, error)) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -338,4 +339,61 @@ func NewPageSeeder[T SQLItemBlueprint](
 		baseClient: baseClient,
 		pageClient: pageClient,
 	}
+}
+
+type SegmentSeeder[T SQLItemBlueprint] struct {
+	db            *sql.DB
+	redis         redis.UniversalClient
+	baseClient    *Base[T]
+	segmentClient *TimeSeries[T]
+}
+
+// let user append both lowerbound and upperbound as argument.
+func (s *SegmentSeeder[T]) Seed(query string, queryArgs []interface{}, lowerbound time.Time, upperbound time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
+	gaps, errFindGaps := s.segmentClient.FindGap(lowerbound, upperbound, keyParam)
+	if errFindGaps != nil {
+		return errFindGaps
+	}
+
+	if gaps != nil {
+		for _, gap := range gaps {
+			lowerGap := time.Unix(gap[0], 0)
+			upperGap := time.Unix(gap[1], 0)
+
+			return s.runSeed(query, queryArgs, lowerGap, upperGap, keyParam, rowsScanner)
+		}
+	}
+
+	return s.runSeed(query, queryArgs, lowerbound, upperbound, keyParam, rowsScanner)
+}
+
+func (s *SegmentSeeder[T]) runSeed(query string, queryArgs []interface{}, lowerGap time.Time, upperGap time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
+
+	queryArgs = append(queryArgs, lowerGap, upperGap)
+
+	rows, err := s.db.QueryContext(context.TODO(), query, queryArgs...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	pipeCtx := context.Background()
+	pipeline := s.redis.Pipeline()
+
+	for rows.Next() {
+		item, errScan := rowsScanner(rows)
+		if errScan != nil {
+			return errScan
+		}
+
+		// Add item to sorted set
+		err := s.segmentClient.IngestItem(pipeline, pipeCtx, item, keyParam)
+		if err != nil {
+			return err
+		}
+	}
+
+	s.segmentClient.AddPage(pipeline, pipeCtx, lowerGap, upperGap, keyParam)
+	_, errPipe := pipeline.Exec(pipeCtx)
+	return errPipe
 }

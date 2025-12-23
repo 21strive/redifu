@@ -134,11 +134,9 @@ func (cr *SortedSet[T]) Fetch(
 	stop int64,
 	byScore bool) ([]T, error) {
 	var items []T
-
 	if direction == "" {
 		return nil, errors.New("must set direction!")
 	}
-
 	sortedSetKey := joinParam(cr.sortedSetKeyFormat, param)
 
 	var result *redis.StringSliceCmd

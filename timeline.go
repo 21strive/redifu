@@ -427,7 +427,7 @@ func (cr *Timeline[T]) Fetch(
 }
 
 func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchSorted(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, processor, processorArgs, cr.relation)
+	return cr.sortedSetClient.Fetch(cr.baseClient, param, cr.direction, processor, processorArgs, cr.relation, 0, -1, false)
 }
 
 func (cr *Timeline[T]) RequiresSeeding(param []string, totalItems int64) (bool, error) {
@@ -526,19 +526,5 @@ func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Bas
 		relation: make(map[string]Relation), // Initialize the map
 	}
 	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction, timeToLive)
-	return timeline
-}
-
-func NewTimelineWithReference[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, sortingReference string, timeToLive time.Duration) *Timeline[T] {
-	if direction != Ascending && direction != Descending {
-		direction = Descending
-	}
-
-	sortedSetClient := SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat)
-
-	timeline := &Timeline[T]{}
-	timeline.Init(client, baseClient, &sortedSetClient, itemPerPage, direction, timeToLive)
-	timeline.SetSortingReference(sortingReference)
 	return timeline
 }
