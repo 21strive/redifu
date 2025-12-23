@@ -3,7 +3,6 @@ package redifu
 import (
 	"context"
 	"errors"
-	"reflect"
 	"time"
 
 	"github.com/21strive/item"
@@ -353,63 +352,67 @@ func (cr *Timeline[T]) Fetch(
 	}
 
 	var listRandIds []string
-	var result *redis.StringSliceCmd
-	if cr.direction == Descending {
-		result = cr.client.ZRevRange(context.TODO(), sortedSetKey, start, stop)
-	} else {
-		result = cr.client.ZRange(context.TODO(), sortedSetKey, start, stop)
-	}
-	if result.Err() != nil {
-		return nil, validLastRandId, position, result.Err()
-	}
-	listRandIds = result.Val()
+	//if cr.direction == Descending {
+	//	result = cr.client.ZRevRange(context.TODO(), sortedSetKey, start, stop)
+	//} else {
+	//	result = cr.client.ZRange(context.TODO(), sortedSetKey, start, stop)
+	//}
+	//if result.Err() != nil {
+	//	return nil, validLastRandId, position, result.Err()
+	//}
+	//listRandIds = result.Val()
+	//
+	//for i := 0; i < len(listRandIds); i++ {
+	//	item, err := cr.baseClient.Get(listRandIds[i])
+	//	if err != nil {
+	//		continue
+	//	}
+	//
+	//	if cr.relation != nil {
+	//		for _, relationFormat := range cr.relation {
+	//			v := reflect.ValueOf(item)
+	//
+	//			if v.Kind() == reflect.Ptr {
+	//				v = v.Elem()
+	//			}
+	//
+	//			relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
+	//			if !relationRandIdField.IsValid() {
+	//				continue
+	//			}
+	//
+	//			relationRandId := relationRandIdField.String()
+	//			if relationRandId == "" {
+	//				continue
+	//			}
+	//
+	//			relationItem, errGet := relationFormat.GetByRandId(relationRandId)
+	//			if errGet != nil {
+	//				continue
+	//			}
+	//
+	//			relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
+	//			if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
+	//				continue
+	//			}
+	//
+	//			relationAttrField.Set(reflect.ValueOf(relationItem))
+	//			if relationRandIdField.CanSet() {
+	//				relationRandIdField.SetString("")
+	//			}
+	//		}
+	//	}
+	//	if processor != nil {
+	//		processor(&item, processorArgs)
+	//	}
+	//
+	//	items = append(items, item)
+	//	validLastRandId = listRandIds[i]
+	//}
 
-	for i := 0; i < len(listRandIds); i++ {
-		item, err := cr.baseClient.Get(listRandIds[i])
-		if err != nil {
-			continue
-		}
-
-		if cr.relation != nil {
-			for _, relationFormat := range cr.relation {
-				v := reflect.ValueOf(item)
-
-				if v.Kind() == reflect.Ptr {
-					v = v.Elem()
-				}
-
-				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
-				if !relationRandIdField.IsValid() {
-					continue
-				}
-
-				relationRandId := relationRandIdField.String()
-				if relationRandId == "" {
-					continue
-				}
-
-				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
-				if errGet != nil {
-					continue
-				}
-
-				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
-				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
-					continue
-				}
-
-				relationAttrField.Set(reflect.ValueOf(relationItem))
-				if relationRandIdField.CanSet() {
-					relationRandIdField.SetString("")
-				}
-			}
-		}
-		if processor != nil {
-			processor(&item, processorArgs)
-		}
-
-		items = append(items, item)
-		validLastRandId = listRandIds[i]
+	items, errFetch := cr.sortedSetClient.Fetch(cr.baseClient, param, cr.direction, processor, processorArgs, cr.relation, start, stop, false)
+	if errFetch != nil {
+		return nil, validLastRandId, position, errFetch
 	}
 
 	if start == 0 {
@@ -424,7 +427,7 @@ func (cr *Timeline[T]) Fetch(
 }
 
 func (cr *Timeline[T]) FetchAll(param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchAll(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, processor, processorArgs, cr.relation)
+	return fetchSorted(cr.client, cr.baseClient, cr.sortedSetClient, param, cr.direction, processor, processorArgs, cr.relation)
 }
 
 func (cr *Timeline[T]) RequiresSeeding(param []string, totalItems int64) (bool, error) {

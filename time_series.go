@@ -182,68 +182,76 @@ func (s *TimeSeries[T]) calculateGaps(segments [][]int64, lowerbound, upperbound
 // Fetch retrieves data from seeded segments within the specified range
 // Optimized: Only filters first and last segments, middle segments are appended directly
 // This reduces complexity from O(2N) to O(N + 2(N_edges))
-func (s *TimeSeries[T]) Fetch(lowerbound int64, upperbound int64, keyParam []string) ([]T, error) {
+func (s *TimeSeries[T]) Fetch(lowerbound int64, upperbound int64, keyParam []string) ([]T, bool, error) {
 	if lowerbound >= upperbound {
-		return nil, fmt.Errorf("invalid range: lowerbound (%d) must be less than upperbound (%d)", lowerbound, upperbound)
+		return nil, false, fmt.Errorf("invalid range: lowerbound (%d) must be less than upperbound (%d)", lowerbound, upperbound)
 	}
 
-	segments, err := s.Scan(lowerbound, upperbound, keyParam)
-	if err != nil {
-		return nil, err
+	gaps, errFindGaps := s.FindGap(lowerbound, upperbound, keyParam)
+	if errFindGaps != nil {
+		return nil, false, errFindGaps
+	}
+	if gaps != nil {
+		return nil, true, nil
 	}
 
-	if segments == nil || len(*segments) == 0 {
-		return []T{}, nil
-	}
+	//segments, err := s.Scan(lowerbound, upperbound, keyParam)
+	//if err != nil {
+	//	return nil, err
+	//}
+	//
+	//if segments == nil || len(*segments) == 0 {
+	//	return []T{}, nil
+	//}
 
-	segs := *segments
-	numSegments := len(segs)
-	result := make([]T, 0)
+	//segs := *segments
+	//numSegments := len(segs)
+	//result := make([]T, 0)
+	//
+	//for i, segment := range segs {
+	//	segmentLower := segment[0]
+	//	segmentUpper := segment[1]
+	//
+	//	// Fetch entire segment (FetchByScore only accepts segment boundaries)
+	//	items, err := s.sorted.Fetch(keyParam, Descending, nil, nil)
+	//	if err != nil {
+	//		return nil, fmt.Errorf("failed to fetch segment [%d-%d]: %w", segmentLower, segmentUpper, err)
+	//	}
+	//
+	//	// Handle different cases based on segment position
+	//	switch {
+	//	case numSegments == 1:
+	//		// Single segment: filter both bounds
+	//		for _, item := range items {
+	//			score := item.GetCreatedAt().UnixMilli()
+	//			if score >= lowerbound && score <= upperbound {
+	//				result = append(result, item)
+	//			}
+	//		}
+	//
+	//	case i == 0:
+	//		// First segment: filter lower bound only
+	//		for _, item := range items {
+	//			if item.GetCreatedAt().UnixMilli() >= lowerbound {
+	//				result = append(result, item)
+	//			}
+	//		}
+	//
+	//	case i == numSegments-1:
+	//		// Last segment: filter upper bound only
+	//		for _, item := range items {
+	//			if item.GetCreatedAt().UnixMilli() <= upperbound {
+	//				result = append(result, item)
+	//			}
+	//		}
+	//
+	//	default:
+	//		// Middle segments: no filtering, append all
+	//		result = append(result, items...)
+	//	}
+	//}
 
-	for i, segment := range segs {
-		segmentLower := segment[0]
-		segmentUpper := segment[1]
-
-		// Fetch entire segment (FetchByScore only accepts segment boundaries)
-		items, err := s.sorted.Fetch(keyParam, Descending, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch segment [%d-%d]: %w", segmentLower, segmentUpper, err)
-		}
-
-		// Handle different cases based on segment position
-		switch {
-		case numSegments == 1:
-			// Single segment: filter both bounds
-			for _, item := range items {
-				score := item.GetCreatedAt().UnixMilli()
-				if score >= lowerbound && score <= upperbound {
-					result = append(result, item)
-				}
-			}
-
-		case i == 0:
-			// First segment: filter lower bound only
-			for _, item := range items {
-				if item.GetCreatedAt().UnixMilli() >= lowerbound {
-					result = append(result, item)
-				}
-			}
-
-		case i == numSegments-1:
-			// Last segment: filter upper bound only
-			for _, item := range items {
-				if item.GetCreatedAt().UnixMilli() <= upperbound {
-					result = append(result, item)
-				}
-			}
-
-		default:
-			// Middle segments: no filtering, append all
-			result = append(result, items...)
-		}
-	}
-
-	return result, nil
+	//return result, nil
 }
 
 // Remove deletes a segment from the segment store by its lowerbound

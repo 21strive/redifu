@@ -109,10 +109,10 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 }
 
 func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return fetchAll[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, processor, processorArgs, srtd.relation)
+	return fetchSorted[T](srtd.client, srtd.baseClient, srtd.sortedSetClient, param, direction, processor, processorArgs, srtd.relation)
 }
 
-func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) error {
+func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -122,8 +122,6 @@ func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Contex
 		1,
 		srtd.timeToLive,
 	)
-
-	return nil
 }
 
 func (srtd *Sorted[T]) DelBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) error {

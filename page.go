@@ -58,6 +58,8 @@ func (p *Page[T]) Fetch(param []string, page int64, processor func(item *T, args
 	return p.sorted.Fetch(param, p.direction, processor, processorArg)
 }
 
+// TODO: Get Total Items
+
 func (p *Page[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
 	param = append(param, strconv.FormatInt(page, 10))
 	p.sorted.SetBlankPage(pipe, pipeCtx, param)
@@ -68,9 +70,9 @@ func (p *Page[T]) RequiresSeeding(param []string, page int64) (bool, error) {
 	return p.sorted.RequiresSeeding(param)
 }
 
-func (p *Page[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, page int64, param []string) {
+func (p *Page[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, page int64, param []string) error {
 	param = append(param, strconv.FormatInt(page, 10))
-	p.sorted.IngestItem(pipe, pipeCtx, item, param, true)
+	return p.sorted.IngestItem(pipe, pipeCtx, item, param, true)
 }
 
 func (p *Page[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {

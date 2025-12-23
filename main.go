@@ -112,7 +112,7 @@ func joinParam(keyFormat string, param []string) string {
 	return sortedSetKey
 }
 
-func fetchAll[T item.Blueprint](
+func fetchSorted[T item.Blueprint](
 	redisClient redis.UniversalClient,
 	baseClient *Base[T],
 	sortedSetClient *SortedSet[T],
