@@ -259,13 +259,13 @@ type PageSeeder[T SQLItemBlueprint] struct {
 
 func (p *PageSeeder[T]) Seed(query string, page int64, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
 	offset := (page - 1) * p.pageClient.itemPerPage
-	adjustedQuery := query + "LIMIT " + strconv.FormatInt(page, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
+	adjustedQuery := query + " LIMIT " + strconv.FormatInt(p.pageClient.itemPerPage, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
 	return p.runSeed(adjustedQuery, args, page, keyParam, func(rows *sql.Rows) (T, error) { return rowsScanner(rows) })
 }
 
 func (p *PageSeeder[T]) SeedWithRelation(query string, page int64, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
 	offset := (page - 1) * p.pageClient.itemPerPage
-	adjustedQuery := query + "LIMIT " + strconv.FormatInt(page, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
+	adjustedQuery := query + " LIMIT " + strconv.FormatInt(p.pageClient.itemPerPage, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
 	return p.runSeed(adjustedQuery, args, page, keyParam, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows, p.pageClient.relation)
 	})
@@ -317,6 +317,8 @@ func (p *PageSeeder[T]) runSeed(
 	} else {
 		p.pageClient.SetExpiration(pipeline, pipeCtx, page, keyParam)
 	}
+
+	p.pageClient.AddPage(pipeline, pipeCtx, page, keyParam)
 
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe

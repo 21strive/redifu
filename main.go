@@ -143,7 +143,6 @@ func fetchAll[T item.Blueprint](
 	listRandIds := result.Val()
 
 	for i := 0; i < len(listRandIds); i++ {
-
 		item, err := baseClient.Get(listRandIds[i])
 		if err != nil {
 			continue
