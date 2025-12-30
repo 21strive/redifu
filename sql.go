@@ -341,24 +341,24 @@ func NewPageSeeder[T SQLItemBlueprint](
 	}
 }
 
-type SegmentSeeder[T SQLItemBlueprint] struct {
-	db            *sql.DB
-	redis         redis.UniversalClient
-	baseClient    *Base[T]
-	segmentClient *TimeSeries[T]
+type TimeSeriesSeeder[T SQLItemBlueprint] struct {
+	db               *sql.DB
+	redis            redis.UniversalClient
+	baseClient       *Base[T]
+	timeSeriesClient *TimeSeries[T]
 }
 
 // let user append both lowerbound and upperbound as argument.
-func (s *SegmentSeeder[T]) Seed(query string, queryArgs []interface{}, lowerbound time.Time, upperbound time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
-	gaps, errFindGaps := s.segmentClient.FindGap(lowerbound, upperbound, keyParam)
+func (s *TimeSeriesSeeder[T]) Seed(query string, queryArgs []interface{}, lowerbound time.Time, upperbound time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
+	gaps, errFindGaps := s.timeSeriesClient.FindGap(lowerbound, upperbound, keyParam)
 	if errFindGaps != nil {
 		return errFindGaps
 	}
 
 	if gaps != nil {
 		for _, gap := range gaps {
-			lowerGap := time.Unix(gap[0], 0)
-			upperGap := time.Unix(gap[1], 0)
+			lowerGap := time.UnixMilli(gap[0]).UTC()
+			upperGap := time.UnixMilli(gap[1]).UTC()
 
 			return s.runSeed(query, queryArgs, lowerGap, upperGap, keyParam, rowsScanner)
 		}
@@ -367,7 +367,7 @@ func (s *SegmentSeeder[T]) Seed(query string, queryArgs []interface{}, lowerboun
 	return s.runSeed(query, queryArgs, lowerbound, upperbound, keyParam, rowsScanner)
 }
 
-func (s *SegmentSeeder[T]) runSeed(query string, queryArgs []interface{}, lowerGap time.Time, upperGap time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
+func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, lowerGap time.Time, upperGap time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
 
 	queryArgs = append(queryArgs, lowerGap, upperGap)
 
@@ -387,13 +387,28 @@ func (s *SegmentSeeder[T]) runSeed(query string, queryArgs []interface{}, lowerG
 		}
 
 		// Add item to sorted set
-		err := s.segmentClient.IngestItem(pipeline, pipeCtx, item, keyParam)
+		s.baseClient.Set(pipeline, pipeCtx, item)
+		err := s.timeSeriesClient.IngestItem(pipeline, pipeCtx, item, keyParam)
 		if err != nil {
 			return err
 		}
 	}
 
-	s.segmentClient.AddPage(pipeline, pipeCtx, lowerGap, upperGap, keyParam)
+	s.timeSeriesClient.AddPage(pipeline, pipeCtx, lowerGap, upperGap, keyParam)
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe
+}
+
+func NewTimeSeriesSeeder[T SQLItemBlueprint](
+	redisClient redis.UniversalClient,
+	db *sql.DB,
+	baseClient *Base[T],
+	timeSeriesClient *TimeSeries[T],
+) *TimeSeriesSeeder[T] {
+	return &TimeSeriesSeeder[T]{
+		redis:            redisClient,
+		db:               db,
+		baseClient:       baseClient,
+		timeSeriesClient: timeSeriesClient,
+	}
 }
