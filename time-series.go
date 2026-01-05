@@ -69,6 +69,10 @@ func (s *TimeSeries[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context
 	return s.sorted.IngestItem(pipe, pipeCtx, item, sortedSetParam, true)
 }
 
+func (s *TimeSeries[T]) RemoveItem(item T, keyParam []string) error {
+	return s.sorted.RemoveItem(item, keyParam)
+}
+
 // AddPage stores a seeded segment range in the segment store
 // Validates that the new segment doesn't overlap with any existing segment
 // Segments are stored in Redis Hash: field = lowerbound (string), value = upperbound (string)
@@ -300,7 +304,7 @@ func (s *TimeSeries[T]) Exists(lowerbound time.Time, keyParam []string) (bool, e
 }
 
 // Count returns the total number of segments stored
-func (s *TimeSeries[T]) CountSegment(keyParam []string) (int64, error) {
+func (s *TimeSeries[T]) CountSegments(keyParam []string) (int64, error) {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
 	return s.redis.HLen(context.TODO(), segmentStoreKey).Result()
 }

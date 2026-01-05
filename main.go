@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/21strive/item"
-	"math"
 	"reflect"
-	"strings"
 	"time"
 )
 
@@ -66,39 +64,9 @@ func getItemScore[T item.Blueprint](item T, sortingReference string) (float64, e
 		return float64(field.Interface().(*time.Time).UnixMilli()), nil
 	case reflect.TypeOf(int64(0)):
 		return float64(field.Interface().(int64)), nil
-	case reflect.TypeOf((*string)(nil)):
-		if field.IsNil() {
-			return 0, errors.New("getItemScore: string field is nil")
-		}
-		return stringToScore(*field.Interface().(*string)), nil
 	default:
 		return 0, fmt.Errorf("getItemScore: field %s is not a time.Time", sortingReference)
 	}
-}
-
-func stringToScore(s string) float64 {
-	if s == "" {
-		return 0
-	}
-
-	// Normalize to lowercase for case-insensitive sorting
-	s = strings.ToLower(s)
-
-	var score float64
-	maxChars := 8 // Limit to prevent overflow
-
-	for i, r := range s {
-		if i >= maxChars {
-			break
-		}
-		// Each character position has decreasing significance
-		// Position 0: multiplied by 1e15
-		// Position 1: multiplied by 1e12
-		// etc.
-		score += float64(r) * math.Pow(1000, float64(maxChars-i-1))
-	}
-
-	return score
 }
 
 func joinParam(keyFormat string, param []string) string {
