@@ -22,6 +22,15 @@ type TimelineSeeder[T SQLItemBlueprint] struct {
 	scoringField     string
 }
 
+func NewTimelineSeeder[T SQLItemBlueprint](redis redis.UniversalClient, db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
+	return &TimelineSeeder[T]{
+		redis:            redis,
+		db:               db,
+		baseClient:       baseClient,
+		paginationClient: paginateClient,
+	}
+}
+
 func (s *TimelineSeeder[T]) SetSortingReference(scoringField string) {
 	s.scoringField = scoringField
 }
@@ -159,20 +168,25 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 	return nil
 }
 
-func NewTimelineSeeder[T SQLItemBlueprint](redis redis.UniversalClient, db *sql.DB, baseClient *Base[T], paginateClient *Timeline[T]) *TimelineSeeder[T] {
-	return &TimelineSeeder[T]{
-		redis:            redis,
-		db:               db,
-		baseClient:       baseClient,
-		paginationClient: paginateClient,
-	}
-}
-
 type SortedSeeder[T SQLItemBlueprint] struct {
 	db           *sql.DB
 	redis        redis.UniversalClient
 	baseClient   *Base[T]
 	sortedClient *Sorted[T]
+}
+
+func NewSortedSeeder[T SQLItemBlueprint](
+	redis redis.UniversalClient,
+	db *sql.DB,
+	baseClient *Base[T],
+	sortedClient *Sorted[T],
+) *SortedSeeder[T] {
+	return &SortedSeeder[T]{
+		redis:        redis,
+		db:           db,
+		baseClient:   baseClient,
+		sortedClient: sortedClient,
+	}
 }
 
 func (s *SortedSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
@@ -237,25 +251,25 @@ func (s *SortedSeeder[T]) runSeed(
 	return errPipe
 }
 
-func NewSortedSeeder[T SQLItemBlueprint](
-	redis redis.UniversalClient,
-	db *sql.DB,
-	baseClient *Base[T],
-	sortedClient *Sorted[T],
-) *SortedSeeder[T] {
-	return &SortedSeeder[T]{
-		redis:        redis,
-		db:           db,
-		baseClient:   baseClient,
-		sortedClient: sortedClient,
-	}
-}
-
 type PageSeeder[T SQLItemBlueprint] struct {
 	redis      redis.UniversalClient
 	db         *sql.DB
 	baseClient *Base[T]
 	pageClient *Page[T]
+}
+
+func NewPageSeeder[T SQLItemBlueprint](
+	redisClient redis.UniversalClient,
+	db *sql.DB,
+	baseClient *Base[T],
+	pageClient *Page[T],
+) *PageSeeder[T] {
+	return &PageSeeder[T]{
+		redis:      redisClient,
+		db:         db,
+		baseClient: baseClient,
+		pageClient: pageClient,
+	}
 }
 
 func (p *PageSeeder[T]) Seed(query string, page int64, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
@@ -271,8 +285,6 @@ func (p *PageSeeder[T]) SeedWithRelation(query string, page int64, rowsScanner R
 		return rowsScanner(rows, p.pageClient.relation)
 	})
 }
-
-// TODO: Get Total Items
 
 func (p *PageSeeder[T]) runSeed(
 	query string,
@@ -327,25 +339,25 @@ func (p *PageSeeder[T]) runSeed(
 	return errPipe
 }
 
-func NewPageSeeder[T SQLItemBlueprint](
-	redisClient redis.UniversalClient,
-	db *sql.DB,
-	baseClient *Base[T],
-	pageClient *Page[T],
-) *PageSeeder[T] {
-	return &PageSeeder[T]{
-		redis:      redisClient,
-		db:         db,
-		baseClient: baseClient,
-		pageClient: pageClient,
-	}
-}
-
 type TimeSeriesSeeder[T SQLItemBlueprint] struct {
 	db               *sql.DB
 	redis            redis.UniversalClient
 	baseClient       *Base[T]
 	timeSeriesClient *TimeSeries[T]
+}
+
+func NewTimeSeriesSeeder[T SQLItemBlueprint](
+	redisClient redis.UniversalClient,
+	db *sql.DB,
+	baseClient *Base[T],
+	timeSeriesClient *TimeSeries[T],
+) *TimeSeriesSeeder[T] {
+	return &TimeSeriesSeeder[T]{
+		redis:            redisClient,
+		db:               db,
+		baseClient:       baseClient,
+		timeSeriesClient: timeSeriesClient,
+	}
 }
 
 // let user append both lowerbound and upperbound as argument.
@@ -368,7 +380,6 @@ func (s *TimeSeriesSeeder[T]) Seed(query string, queryArgs []interface{}, lowerb
 }
 
 func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, lowerGap time.Time, upperGap time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
-
 	queryArgs = append(queryArgs, lowerGap, upperGap)
 
 	rows, err := s.db.QueryContext(context.TODO(), query, queryArgs...)
@@ -380,35 +391,28 @@ func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, low
 	pipeCtx := context.Background()
 	pipeline := s.redis.Pipeline()
 
+	isSortedExists := s.timeSeriesClient.Count(keyParam) > 0
+	var counterLoop int64
 	for rows.Next() {
 		item, errScan := rowsScanner(rows)
 		if errScan != nil {
 			return errScan
 		}
 
-		// Add item to sorted set
 		s.baseClient.Set(pipeline, pipeCtx, item)
 		err := s.timeSeriesClient.IngestItem(pipeline, pipeCtx, item, keyParam)
 		if err != nil {
 			return err
 		}
+		counterLoop++
+	}
+
+	// only set expiration in the first seed attempt
+	if counterLoop > 0 && !isSortedExists {
+		s.timeSeriesClient.SetExpiration(pipeline, pipeCtx, keyParam)
 	}
 
 	s.timeSeriesClient.AddPage(pipeline, pipeCtx, lowerGap, upperGap, keyParam)
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe
-}
-
-func NewTimeSeriesSeeder[T SQLItemBlueprint](
-	redisClient redis.UniversalClient,
-	db *sql.DB,
-	baseClient *Base[T],
-	timeSeriesClient *TimeSeries[T],
-) *TimeSeriesSeeder[T] {
-	return &TimeSeriesSeeder[T]{
-		redis:            redisClient,
-		db:               db,
-		baseClient:       baseClient,
-		timeSeriesClient: timeSeriesClient,
-	}
 }

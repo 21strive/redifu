@@ -34,6 +34,14 @@ func NewTimeSeries[T item.Blueprint](
 	}
 }
 
+func (s *TimeSeries[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, keyParam []string) {
+	s.sorted.SetExpiration(pipe, pipeCtx, keyParam)
+}
+
+func (s *TimeSeries[T]) Count(keyParam []string) int64 {
+	return s.sorted.Count(keyParam)
+}
+
 func (s *TimeSeries[T]) AddItem(item T, keyParam []string) error {
 	itemScore, errGetScore := getItemScore(item, s.sorted.sortingReference)
 	if errGetScore != nil {
@@ -292,7 +300,7 @@ func (s *TimeSeries[T]) Exists(lowerbound time.Time, keyParam []string) (bool, e
 }
 
 // Count returns the total number of segments stored
-func (s *TimeSeries[T]) Count(keyParam []string) (int64, error) {
+func (s *TimeSeries[T]) CountSegment(keyParam []string) (int64, error) {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
 	return s.redis.HLen(context.TODO(), segmentStoreKey).Result()
 }

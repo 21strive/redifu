@@ -22,6 +22,21 @@ type Timeline[T item.Blueprint] struct {
 	timeToLive       time.Duration
 }
 
+func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) *Timeline[T] {
+	if direction != Ascending && direction != Descending {
+		direction = Descending
+	}
+
+	sortedSetClient := &SortedSet[T]{}
+	sortedSetClient.Init(client, keyFormat)
+
+	timeline := &Timeline[T]{
+		relation: make(map[string]Relation), // Initialize the map
+	}
+	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction, timeToLive)
+	return timeline
+}
+
 func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], itemPerPage int64, direction string, timeToLive time.Duration) {
 	cr.client = client
 	cr.baseClient = baseClient
@@ -112,38 +127,38 @@ func (cr *Timeline[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context,
 		}
 
 		if cr.direction == Descending {
-			if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) > 0 {
+			if cr.sortedSetClient.Count(sortedSetParam) > 0 {
 				lowestScore, err := cr.sortedSetClient.LowestScore(sortedSetParam)
 				if err != nil {
 					return err
 				}
 
 				if score >= lowestScore {
-					if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) == cr.itemPerPage && isFirstPage {
+					if cr.sortedSetClient.Count(sortedSetParam) == cr.itemPerPage && isFirstPage {
 						cr.DelFirstPage(pipe, pipeCtx, sortedSetParam)
 					}
-					cr.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
+					cr.sortedSetClient.SetItem(pipe, pipeCtx, sortedSetParam, score, item)
 				}
 			}
 		} else if cr.direction == Ascending {
-			if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) > 0 {
+			if cr.sortedSetClient.Count(sortedSetParam) > 0 {
 				highestScore, err := cr.sortedSetClient.HighestScore(sortedSetParam)
 				if err != nil {
 					return err
 				}
 
 				if score <= highestScore {
-					if cr.sortedSetClient.TotalItemOnSortedSet(sortedSetParam) == cr.itemPerPage && isFirstPage {
+					if cr.sortedSetClient.Count(sortedSetParam) == cr.itemPerPage && isFirstPage {
 						cr.DelFirstPage(pipe, pipeCtx, sortedSetParam)
 					}
 					if isFirstPage || isLastPage {
-						cr.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
+						cr.sortedSetClient.SetItem(pipe, pipeCtx, sortedSetParam, score, item)
 					}
 				}
 			}
 		}
 	} else {
-		cr.sortedSetClient.SetSortedSet(pipe, pipeCtx, sortedSetParam, score, item)
+		cr.sortedSetClient.SetItem(pipe, pipeCtx, sortedSetParam, score, item)
 	}
 
 	return nil
@@ -158,7 +173,7 @@ func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 		return errDelBase
 	}
 
-	err := cr.sortedSetClient.DeleteFromSortedSet(pipe, pipeCtx, param, item)
+	err := cr.sortedSetClient.RemoveItem(pipe, pipeCtx, param, item)
 	if err != nil {
 		return err
 	}
@@ -168,7 +183,7 @@ func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 		return errFirstPage
 	}
 	if isFirstPage {
-		numItem := cr.sortedSetClient.TotalItemOnSortedSet(param) // O(log(n))
+		numItem := cr.sortedSetClient.Count(param) // O(log(n))
 		if numItem == 0 {
 			cr.DelFirstPage(pipe, pipeCtx, param)
 		}
@@ -179,7 +194,7 @@ func (cr *Timeline[T]) RemoveItem(item T, param []string) error {
 		return errLastPage
 	}
 	if isLastPage {
-		numItem := cr.sortedSetClient.TotalItemOnSortedSet(param)
+		numItem := cr.sortedSetClient.Count(param)
 		if numItem == 0 {
 			cr.DelLastPage(pipe, pipeCtx, param)
 		}
@@ -396,7 +411,7 @@ func (cr *Timeline[T]) Fetch(
 	//				continue
 	//			}
 	//
-	//			relationAttrField.Set(reflect.ValueOf(relationItem))
+	//			relationAttrField.SetItem(reflect.ValueOf(relationItem))
 	//			if relationRandIdField.CanSet() {
 	//				relationRandIdField.SetString("")
 	//			}
@@ -475,7 +490,7 @@ func (cr *Timeline[T]) RemovePagination(param []string) error {
 	pipeCtx := context.Background()
 	pipe := cr.client.Pipeline()
 
-	err := cr.sortedSetClient.DeleteSortedSet(pipe, pipeCtx, param)
+	err := cr.sortedSetClient.Delete(pipe, pipeCtx, param)
 	if err != nil {
 		return err
 	}
@@ -501,7 +516,7 @@ func (cr *Timeline[T]) PurgePagination(param []string) error {
 		cr.baseClient.Del(pipe, pipeCtx, item)
 	}
 
-	err = cr.sortedSetClient.DeleteSortedSet(pipe, pipeCtx, param)
+	err = cr.sortedSetClient.Delete(pipe, pipeCtx, param)
 	if err != nil {
 		return err
 	}
@@ -512,19 +527,4 @@ func (cr *Timeline[T]) PurgePagination(param []string) error {
 
 	_, errPipe := pipe.Exec(pipeCtx)
 	return errPipe
-}
-
-func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) *Timeline[T] {
-	if direction != Ascending && direction != Descending {
-		direction = Descending
-	}
-
-	sortedSetClient := &SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat)
-
-	timeline := &Timeline[T]{
-		relation: make(map[string]Relation), // Initialize the map
-	}
-	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction, timeToLive)
-	return timeline
 }

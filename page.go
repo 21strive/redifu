@@ -17,6 +17,16 @@ type Page[T item.Blueprint] struct {
 	itemPerPage        int64
 }
 
+func NewPage[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) *Page[T] {
+	adjustedKeyFormat := keyFormat + ":page:%s"
+	pageIndexKeyFormat := keyFormat + ":page-index"
+	sorted := NewSorted[T](client, baseClient, adjustedKeyFormat, timeToLive)
+
+	page := &Page[T]{}
+	page.Init(client, sorted, pageIndexKeyFormat, direction, itemPerPage)
+	return page
+}
+
 func (p *Page[T]) Init(client redis.UniversalClient, sortedClient *Sorted[T], pageIndexKeyFormat string, direction string, itemPerPage int64) {
 	p.client = client
 	p.sorted = sortedClient
@@ -83,6 +93,7 @@ func (p *Page[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, page in
 	}
 
 	pipe.ZAdd(pipeCtx, key, member)
+	pipe.Expire(pipeCtx, key, p.sorted.timeToLive)
 }
 
 func (p *Page[T]) PurgeAll(param []string) error {
@@ -95,7 +106,7 @@ func (p *Page[T]) PurgeAll(param []string) error {
 
 	for _, member := range result.Val() {
 		newParam := append(param, member)
-		errPurge := p.sorted.PurgeSorted(newParam)
+		errPurge := p.sorted.Purge(newParam)
 		if errPurge != nil {
 			return errPurge
 		}
@@ -107,14 +118,4 @@ func (p *Page[T]) PurgeAll(param []string) error {
 	}
 
 	return nil
-}
-
-func NewPage[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) *Page[T] {
-	adjustedKeyFormat := keyFormat + ":page:%s"
-	pageIndexKeyFormat := keyFormat + ":page-index"
-	sorted := NewSorted[T](client, baseClient, adjustedKeyFormat, timeToLive)
-
-	page := &Page[T]{}
-	page.Init(client, sorted, pageIndexKeyFormat, direction, itemPerPage)
-	return page
 }

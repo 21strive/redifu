@@ -17,12 +17,18 @@ type SortedSet[T item.Blueprint] struct {
 	sortedSetKeyFormat string
 }
 
+func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string) *SortedSet[T] {
+	sorted := &SortedSet[T]{}
+	sorted.Init(client, sortedSetKeyFormat)
+	return sorted
+}
+
 func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat string) {
 	cr.client = client
 	cr.sortedSetKeyFormat = sortedSetKeyFormat
 }
 
-func (cr *SortedSet[T]) SetSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, score float64, item T) {
+func (cr *SortedSet[T]) SetItem(pipe redis.Pipeliner, ctx context.Context, param []string, score float64, item T) {
 	var key string
 	if param == nil {
 		key = cr.sortedSetKeyFormat
@@ -56,7 +62,7 @@ func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context,
 	)
 }
 
-func (cr *SortedSet[T]) DeleteFromSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string, item T) error {
+func (cr *SortedSet[T]) RemoveItem(pipe redis.Pipeliner, ctx context.Context, param []string, item T) error {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	removeFromSortedSet := pipe.ZRem(
@@ -71,7 +77,7 @@ func (cr *SortedSet[T]) DeleteFromSortedSet(pipe redis.Pipeliner, ctx context.Co
 	return nil
 }
 
-func (cr *SortedSet[T]) TotalItemOnSortedSet(param []string) int64 {
+func (cr *SortedSet[T]) Count(param []string) int64 {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	getTotalItemSortedSet := cr.client.ZCard(context.TODO(), key)
@@ -82,7 +88,7 @@ func (cr *SortedSet[T]) TotalItemOnSortedSet(param []string) int64 {
 	return getTotalItemSortedSet.Val()
 }
 
-func (cr *SortedSet[T]) DeleteSortedSet(pipe redis.Pipeliner, ctx context.Context, param []string) error {
+func (cr *SortedSet[T]) Delete(pipe redis.Pipeliner, ctx context.Context, param []string) error {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	removeSortedSet := pipe.Del(ctx, key)
@@ -211,10 +217,4 @@ func (cr *SortedSet[T]) Fetch(
 	}
 
 	return items, nil
-}
-
-func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string, timeToLive time.Duration) *SortedSet[T] {
-	sorted := &SortedSet[T]{}
-	sorted.Init(client, sortedSetKeyFormat)
-	return sorted
 }
