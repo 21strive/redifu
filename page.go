@@ -44,11 +44,32 @@ func (p *Page[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, p
 	p.sorted.SetExpiration(pipe, pipeCtx, param)
 }
 
+func (p *Page[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
+	param = append(param, strconv.FormatInt(page, 10))
+	p.sorted.SetBlankPage(pipe, pipeCtx, param)
+}
+
+func (p *Page[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
+	key := joinParam(p.pageIndexKeyFormat, param)
+	member := redis.Z{
+		Score:  float64(page),
+		Member: strconv.FormatInt(page, 10),
+	}
+
+	pipe.ZAdd(pipeCtx, key, member)
+	pipe.Expire(pipeCtx, key, p.sorted.timeToLive)
+}
+
 func (p *Page[T]) AddRelation(identifier string, relationBase Relation) {
 	if p.relation == nil {
 		p.relation = make(map[string]Relation)
 	}
 	p.relation[identifier] = relationBase
+}
+
+func (p *Page[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, page int64, param []string) error {
+	param = append(param, strconv.FormatInt(page, 10))
+	return p.sorted.IngestItem(pipe, pipeCtx, item, param, true)
 }
 
 func (p *Page[T]) GetRelation() map[string]Relation {
@@ -63,56 +84,98 @@ func (p *Page[T]) GetSorted() *Sorted[T] {
 	return p.sorted
 }
 
-func (p *Page[T]) Fetch(param []string, page int64, processor func(item *T, args []interface{}), processorArg []interface{}) ([]T, error) {
-	param = append(param, strconv.FormatInt(page, 10))
-	return p.sorted.Fetch(param, p.direction, processor, processorArg)
-}
-
-// TODO: Get Total Items
-
-func (p *Page[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
-	param = append(param, strconv.FormatInt(page, 10))
-	p.sorted.SetBlankPage(pipe, pipeCtx, param)
-}
-
-func (p *Page[T]) RequiresSeeding(param []string, page int64) (bool, error) {
-	param = append(param, strconv.FormatInt(page, 10))
-	return p.sorted.RequiresSeeding(param)
-}
-
-func (p *Page[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, page int64, param []string) error {
-	param = append(param, strconv.FormatInt(page, 10))
-	return p.sorted.IngestItem(pipe, pipeCtx, item, param, true)
-}
-
-func (p *Page[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
-	key := joinParam(p.pageIndexKeyFormat, param)
-	member := redis.Z{
-		Score:  float64(page),
-		Member: strconv.FormatInt(page, 10),
+func (p *Page[T]) Fetch(page int64) *PageFetchBuilder[T] {
+	return &PageFetchBuilder[T]{
+		page:          p,
+		pageNumber:    page,
+		params:        nil,
+		processor:     nil,
+		processorArgs: nil,
 	}
-
-	pipe.ZAdd(pipeCtx, key, member)
-	pipe.Expire(pipeCtx, key, p.sorted.timeToLive)
 }
 
-func (p *Page[T]) PurgeAll(param []string) error {
-	key := joinParam(p.pageIndexKeyFormat, param)
+func (p *Page[T]) RequiresSeeding(page int64) *PageRequiresSeedingBuilder[T] {
+	return &PageRequiresSeedingBuilder[T]{
+		page:       p,
+		pageNumber: page,
+		params:     nil,
+	}
+}
 
-	result := p.client.ZRange(context.TODO(), key, 0, -1)
+func (p *Page[T]) Purge() *PagePurgeBuilder[T] {
+	return &PagePurgeBuilder[T]{
+		page:   p,
+		params: nil,
+	}
+}
+
+type PageFetchBuilder[T item.Blueprint] struct {
+	page          *Page[T]
+	pageNumber    int64
+	params        []string
+	processor     func(*T, []interface{})
+	processorArgs []interface{}
+}
+
+func (f *PageFetchBuilder[T]) WithParams(params ...string) *PageFetchBuilder[T] {
+	f.params = params
+	return f
+}
+
+func (f *PageFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), processorArgs ...interface{}) *PageFetchBuilder[T] {
+	f.processor = processor
+	f.processorArgs = processorArgs
+	return f
+}
+
+func (f *PageFetchBuilder[T]) Exec() ([]T, error) {
+	param := append(f.params, strconv.FormatInt(f.pageNumber, 10))
+	return f.page.sorted.Fetch(param, f.page.direction, f.processor, f.processorArgs)
+}
+
+type PageRequiresSeedingBuilder[T item.Blueprint] struct {
+	page       *Page[T]
+	pageNumber int64
+	params     []string
+}
+
+func (f *PageRequiresSeedingBuilder[T]) WithParams(params ...string) *PageRequiresSeedingBuilder[T] {
+	f.params = params
+	return f
+}
+
+func (f *PageRequiresSeedingBuilder[T]) Exec() (bool, error) {
+	param := append(f.params, strconv.FormatInt(f.pageNumber, 10))
+	return f.page.sorted.RequiresSeeding(param)
+}
+
+type PagePurgeBuilder[T item.Blueprint] struct {
+	page   *Page[T]
+	params []string
+}
+
+func (f *PagePurgeBuilder[T]) WithParams(params ...string) *PagePurgeBuilder[T] {
+	f.params = params
+	return f
+}
+
+func (f *PagePurgeBuilder[T]) Exec(ctx context.Context) error {
+	key := joinParam(f.page.pageIndexKeyFormat, f.params)
+
+	result := f.page.client.ZRange(ctx, key, 0, -1)
 	if result.Err() != nil {
 		return result.Err()
 	}
 
 	for _, member := range result.Val() {
-		newParam := append(param, member)
-		errPurge := p.sorted.Purge(newParam)
+		newParam := append(f.params, member)
+		errPurge := f.page.sorted.Purge(newParam)
 		if errPurge != nil {
 			return errPurge
 		}
 	}
 
-	delPageIndex := p.client.Del(context.TODO(), key)
+	delPageIndex := f.page.client.Del(context.TODO(), key)
 	if delPageIndex.Err() != nil {
 		return delPageIndex.Err()
 	}

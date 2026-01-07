@@ -235,8 +235,6 @@ func (s *TimeSeries[T]) calculateGaps(segments [][]int64, lowerbound, upperbound
 }
 
 // Fetch retrieves data from seeded segments within the specified range
-// Optimized: Only filters first and last segments, middle segments are appended directly
-// This reduces complexity from O(2N) to O(N + 2(N_edges))
 func (s *TimeSeries[T]) Fetch(lowerbound time.Time, upperbound time.Time, param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, bool, error) {
 	if !lowerbound.Before(upperbound) {
 		return nil, false, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))

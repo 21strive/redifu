@@ -121,12 +121,11 @@ func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
 	return errPipe
 }
 
-func (srtd *Sorted[T]) Fetch(param []string, direction string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return srtd.sortedSetClient.Fetch(srtd.baseClient, param, direction, processor, processorArgs, srtd.relation, 0, -1, false)
-}
-
-func (srtd *Sorted[T]) FetchByScore(param []string, direction string, lowerBound int64, upperBound int64, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, error) {
-	return srtd.sortedSetClient.Fetch(srtd.baseClient, param, direction, processor, processorArgs, srtd.relation, lowerBound, upperBound, true)
+func (srtd *Sorted[T]) Fetch(ctx context.Context, direction string) *SortedFetchBuilder[T] {
+	return &SortedFetchBuilder[T]{
+		mainCtx:   ctx,
+		direction: direction,
+	}
 }
 
 func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, param []string) {
@@ -214,4 +213,67 @@ func (srtd *Sorted[T]) Purge(param []string) error {
 
 	_, errPipe := pipe.Exec(pipeCtx)
 	return errPipe
+}
+
+type SortedFetchBuilder[T item.Blueprint] struct {
+	mainCtx       context.Context
+	direction     string
+	sorted        *Sorted[T]
+	params        []string
+	processor     func(*T, []interface{})
+	processorArgs []interface{}
+	byScore       bool
+	lowerbound    int64
+	upperbound    int64
+}
+
+func (s *SortedFetchBuilder[T]) WithParams(params ...string) *SortedFetchBuilder[T] {
+	s.params = params
+	return s
+}
+
+func (s *SortedFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), processorArgs ...interface{}) *SortedFetchBuilder[T] {
+	s.processor = processor
+	s.processorArgs = processorArgs
+	return s
+}
+
+func (s *SortedFetchBuilder[T]) ByScore(lowerbound int64, upperbound int64) *SortedFetchBuilder[T] {
+	s.byScore = true
+	s.lowerbound = lowerbound
+	s.upperbound = upperbound
+	return s
+}
+
+func (s *SortedFetchBuilder[T]) Exec() ([]T, error) {
+	if s.byScore {
+		return s.sorted.sortedSetClient.Fetch(
+			s.mainCtx,
+			s.sorted.baseClient,
+			s.params,
+			s.direction,
+			s.processor,
+			s.processorArgs,
+			s.sorted.relation,
+			0, -1, false)
+	} else {
+		return s.sorted.sortedSetClient.Fetch(
+			s.mainCtx,
+			s.sorted.baseClient,
+			s.params,
+			s.direction,
+			s.processor,
+			s.processorArgs,
+			s.sorted.relation,
+			s.lowerbound,
+			s.upperbound, true)
+	}
+}
+
+type SortedRequiresSeedingBuilder[T item.Blueprint] struct {
+	mainCtx       context.Context
+	sorted        *Sorted[T]
+	params        []string
+	processor     func(*T, []interface{})
+	processorArgs []interface{}
 }

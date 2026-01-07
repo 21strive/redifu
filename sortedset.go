@@ -130,6 +130,7 @@ func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
 }
 
 func (cr *SortedSet[T]) Fetch(
+	ctx context.Context,
 	baseClient *Base[T],
 	param []string,
 	direction string,
@@ -152,15 +153,15 @@ func (cr *SortedSet[T]) Fetch(
 			Max: strconv.FormatInt(stop, 10),
 		}
 		if direction == Descending {
-			result = cr.client.ZRevRangeByScore(context.TODO(), sortedSetKey, &reqRange)
+			result = cr.client.ZRevRangeByScore(ctx, sortedSetKey, &reqRange)
 		} else {
-			result = cr.client.ZRangeByScore(context.TODO(), sortedSetKey, &reqRange)
+			result = cr.client.ZRangeByScore(ctx, sortedSetKey, &reqRange)
 		}
 	} else {
 		if direction == Descending {
-			result = cr.client.ZRevRange(context.TODO(), sortedSetKey, start, stop)
+			result = cr.client.ZRevRange(ctx, sortedSetKey, start, stop)
 		} else {
-			result = cr.client.ZRange(context.TODO(), sortedSetKey, start, stop)
+			result = cr.client.ZRange(ctx, sortedSetKey, start, stop)
 		}
 	}
 
