@@ -22,34 +22,34 @@ func (cr *Base[T]) Init(client redis.UniversalClient, itemKeyFormat string, time
 	cr.timeToLive = timeToLive
 }
 
-func (cr *Base[T]) Get(param string) (T, error) {
+func (cr *Base[T]) Get(ctx context.Context, keyParam string) (T, error) {
 	var nilItem T
-	key := fmt.Sprintf(cr.itemKeyFormat, param)
+	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 
-	result := cr.client.Get(context.TODO(), key)
+	result := cr.client.Get(ctx, key)
 	if result.Err() != nil {
-		if result.Err() == redis.Nil {
+		if errors.Is(result.Err(), redis.Nil) {
 			return nilItem, redis.Nil
 		}
 		return nilItem, result.Err()
 	}
 
-	var item T
-	errorUnmarshal := json.Unmarshal([]byte(result.Val()), &item)
+	var fetchedItem T
+	errorUnmarshal := json.Unmarshal([]byte(result.Val()), &fetchedItem)
 	if errorUnmarshal != nil {
 		return nilItem, errorUnmarshal
 	}
 
-	return item, nil
+	return fetchedItem, nil
 }
 
-func (cr *Base[T]) Set(pipe redis.Pipeliner, ctx context.Context, item T, param ...string) error {
-	if len(param) > 1 {
-		return errors.New("only accept one param")
+func (cr *Base[T]) Set(ctx context.Context, pipe redis.Pipeliner, item T, keyParam ...string) error {
+	if len(keyParam) > 1 {
+		return errors.New("only accept one keyParam")
 	}
 	var key string
-	if param != nil {
-		key = fmt.Sprintf(cr.itemKeyFormat, param[0])
+	if keyParam != nil {
+		key = fmt.Sprintf(cr.itemKeyFormat, keyParam[0])
 	} else {
 		key = fmt.Sprintf(cr.itemKeyFormat, item.GetRandId())
 	}
@@ -67,33 +67,32 @@ func (cr *Base[T]) Set(pipe redis.Pipeliner, ctx context.Context, item T, param 
 		cr.timeToLive,
 	)
 
-	if param != nil {
-		cr.DelBlank(pipe, param...)
+	if keyParam != nil {
+		cr.DelBlank(ctx, pipe, keyParam...)
 	} else {
-		cr.DelBlank(pipe, item.GetRandId())
+		cr.DelBlank(ctx, pipe, item.GetRandId())
 	}
 
 	return nil
 }
 
-func (cr *Base[T]) Upsert(item T, param ...string) error {
-	pipeCtx := context.Background()
+func (cr *Base[T]) Upsert(ctx context.Context, item T, keyParam ...string) error {
 	pipeline := cr.client.Pipeline()
-	errSet := cr.Set(pipeline, pipeCtx, item, param...)
+	errSet := cr.Set(ctx, pipeline, item, keyParam...)
 	if errSet != nil {
 		return errSet
 	}
-	_, errPipe := pipeline.Exec(pipeCtx)
+	_, errPipe := pipeline.Exec(ctx)
 	return errPipe
 }
 
-func (cr *Base[T]) Del(pipe redis.Pipeliner, ctx context.Context, item T, param ...string) error {
-	if len(param) > 1 {
-		return errors.New("only accept one param")
+func (cr *Base[T]) Del(ctx context.Context, pipe redis.Pipeliner, item T, keyParam ...string) error {
+	if len(keyParam) > 1 {
+		return errors.New("only accept one keyParam")
 	}
 	var key string
-	if param != nil {
-		key = fmt.Sprintf(cr.itemKeyFormat, param[0])
+	if keyParam != nil {
+		key = fmt.Sprintf(cr.itemKeyFormat, keyParam[0])
 	} else {
 		key = fmt.Sprintf(cr.itemKeyFormat, item.GetRandId())
 	}
@@ -109,12 +108,12 @@ func (cr *Base[T]) Del(pipe redis.Pipeliner, ctx context.Context, item T, param 
 	return nil
 }
 
-func (cr *Base[T]) SetBlank(param ...string) error {
-	key := fmt.Sprintf(cr.itemKeyFormat, param)
+func (cr *Base[T]) SetBlank(ctx context.Context, keyParam ...string) error {
+	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
 	setBlank := cr.client.Set(
-		context.TODO(),
+		ctx,
 		key,
 		1,
 		cr.timeToLive,
@@ -126,13 +125,13 @@ func (cr *Base[T]) SetBlank(param ...string) error {
 	return nil
 }
 
-func (cr *Base[T]) IsBlank(param ...string) (bool, error) {
-	key := fmt.Sprintf(cr.itemKeyFormat, param)
+func (cr *Base[T]) IsBlank(ctx context.Context, keyParam ...string) (bool, error) {
+	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
-	getBlank := cr.client.Get(context.TODO(), key)
+	getBlank := cr.client.Get(ctx, key)
 	if getBlank.Err() != nil {
-		if getBlank.Err() == redis.Nil {
+		if errors.Is(getBlank.Err(), redis.Nil) {
 			return false, nil
 		}
 		return false, getBlank.Err()
@@ -144,11 +143,11 @@ func (cr *Base[T]) IsBlank(param ...string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Base[T]) DelBlank(pipe redis.Pipeliner, param ...string) {
-	key := fmt.Sprintf(cr.itemKeyFormat, param)
+func (cr *Base[T]) DelBlank(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
+	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
-	pipe.Del(context.TODO(), key)
+	pipe.Del(ctx, key)
 }
 
 func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *Base[T] {

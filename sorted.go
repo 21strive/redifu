@@ -48,72 +48,71 @@ func (srtd *Sorted[T]) SetSortingReference(sortingReference string) {
 	srtd.sortingReference = sortingReference
 }
 
-func (srtd *Sorted[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, sortedSetParam []string) {
-	srtd.sortedSetClient.SetExpiration(pipe, pipeCtx, sortedSetParam, srtd.timeToLive)
+func (srtd *Sorted[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, sortedSetParam []string) {
+	srtd.sortedSetClient.SetExpiration(ctx, pipe, sortedSetParam, srtd.timeToLive)
 }
 
-func (srtd *Sorted[T]) Count(keyParam []string) int64 {
-	return srtd.sortedSetClient.Count(keyParam)
+func (srtd *Sorted[T]) Count(ctx context.Context, keyParam ...string) int64 {
+	return srtd.sortedSetClient.Count(ctx, keyParam)
 }
 
-func (srtd *Sorted[T]) AddItem(item T, sortedSetParam []string) error {
-	_, errGet := srtd.baseClient.Get(item.GetRandId())
-	if errGet != nil && errGet != redis.Nil {
+func (srtd *Sorted[T]) AddItem(ctx context.Context, item T, keyParam ...string) error {
+	_, errGet := srtd.baseClient.Get(ctx, item.GetRandId())
+	if errGet != nil && errors.Is(errGet, redis.Nil) {
 		return errGet
 	}
 
-	pipeCtx := context.Background()
 	pipe := srtd.client.Pipeline()
 
 	if errors.Is(errGet, redis.Nil) {
-		errSet := srtd.baseClient.Set(pipe, pipeCtx, item)
+		errSet := srtd.baseClient.Set(ctx, pipe, item)
 		if errSet != nil {
 			return errSet
 		}
 	}
 
-	errIngest := srtd.IngestItem(pipe, pipeCtx, item, sortedSetParam, false)
+	errIngest := srtd.IngestItem(ctx, pipe, item, keyParam, false)
 	if errIngest != nil {
 		return errIngest
 	}
 
-	_, errPipe := pipe.Exec(pipeCtx)
+	_, errPipe := pipe.Exec(ctx)
 	return errPipe
 }
 
-func (srtd *Sorted[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, sortedSetParam []string, seed bool) error {
+func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, sortedSetParam []string, seed bool) error {
 	score, err := getItemScore(item, srtd.sortingReference)
 	if err != nil {
 		return err
 	}
 
 	if !seed {
-		isBlankPage, errGet := srtd.IsBlankPage(sortedSetParam)
+		isBlankPage, errGet := srtd.IsBlankPage(ctx, sortedSetParam)
 		if errGet != nil {
 			return errGet
 		}
 		if isBlankPage {
-			srtd.DelBlankPage(pipe, pipeCtx, sortedSetParam)
+			srtd.DelBlankPage(pipe, ctx, sortedSetParam)
 		}
 
-		if srtd.sortedSetClient.Count(sortedSetParam) > 0 {
-			srtd.sortedSetClient.SetItem(pipe, pipeCtx, sortedSetParam, score, item)
+		if srtd.sortedSetClient.Count(ctx, sortedSetParam) > 0 {
+			srtd.sortedSetClient.SetItem(ctx, pipe, sortedSetParam, score, item)
 		}
 	} else {
-		srtd.sortedSetClient.SetItem(pipe, pipeCtx, sortedSetParam, score, item)
+		srtd.sortedSetClient.SetItem(ctx, pipe, sortedSetParam, score, item)
 	}
 
 	return nil
 }
 
-func (srtd *Sorted[T]) RemoveItem(item T, sortedSetParam []string) error {
+func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, sortedSetParam []string) error {
 	pipe := srtd.client.Pipeline()
-	errDelBase := srtd.baseClient.Del(pipe, context.Background(), item)
+	errDelBase := srtd.baseClient.Del(ctx, pipe, item)
 	if errDelBase != nil {
 		return errDelBase
 	}
 
-	errDel := srtd.sortedSetClient.RemoveItem(pipe, context.Background(), sortedSetParam, item)
+	errDel := srtd.sortedSetClient.RemoveItem(ctx, pipe, sortedSetParam, item)
 	if errDel != nil {
 		return errDel
 	}
@@ -148,11 +147,11 @@ func (srtd *Sorted[T]) DelBlankPage(pipe redis.Pipeliner, pipeCtx context.Contex
 	return nil
 }
 
-func (srtd *Sorted[T]) IsBlankPage(param []string) (bool, error) {
+func (srtd *Sorted[T]) IsBlankPage(ctx context.Context, param []string) (bool, error) {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, param)
 	lastPageKey := sortedSetKey + ":blankpage"
 
-	getLastPageKey := srtd.client.Get(context.TODO(), lastPageKey)
+	getLastPageKey := srtd.client.Get(ctx, lastPageKey)
 	if getLastPageKey.Err() != nil {
 		if getLastPageKey.Err() == redis.Nil {
 			return false, nil
@@ -167,14 +166,14 @@ func (srtd *Sorted[T]) IsBlankPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (srtd *Sorted[T]) RequiresSeeding(param []string) (bool, error) {
-	isBlankPage, err := srtd.IsBlankPage(param)
+func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string) (bool, error) {
+	isBlankPage, err := srtd.IsBlankPage(ctx, keyParams)
 	if err != nil {
 		return false, err
 	}
 
 	if !isBlankPage {
-		if srtd.sortedSetClient.Count(param) > 0 {
+		if srtd.sortedSetClient.Count(ctx, keyParams) > 0 {
 			return false, nil
 		}
 		return true, nil
@@ -183,9 +182,9 @@ func (srtd *Sorted[T]) RequiresSeeding(param []string) (bool, error) {
 	}
 }
 
-func (srtd *Sorted[T]) Remove(param []string) error {
+func (srtd *Sorted[T]) Remove(ctx context.Context, param ...string) error {
 	pipe := srtd.client.Pipeline()
-	err := srtd.sortedSetClient.Delete(pipe, context.Background(), param)
+	err := srtd.sortedSetClient.Delete(ctx, pipe, param)
 	if err != nil {
 		return err
 	}
@@ -193,20 +192,20 @@ func (srtd *Sorted[T]) Remove(param []string) error {
 	return errPipe
 }
 
-func (srtd *Sorted[T]) Purge(param []string) error {
+func (srtd *Sorted[T]) Purge(ctx context.Context, params ...string) error {
 	pipeCtx := context.Background()
 	pipe := srtd.client.Pipeline()
 
-	items, err := srtd.Fetch(param, Descending, nil, nil)
+	items, err := srtd.Fetch(ctx, Ascending).WithParams(params...).Exec()
 	if err != nil {
 		return err
 	}
 
 	for _, item := range items {
-		srtd.baseClient.Del(pipe, pipeCtx, item)
+		srtd.baseClient.Del(ctx, pipe, item)
 	}
 
-	err = srtd.sortedSetClient.Delete(pipe, pipeCtx, param)
+	err = srtd.sortedSetClient.Delete(ctx, pipe, params)
 	if err != nil {
 		return err
 	}
@@ -268,12 +267,4 @@ func (s *SortedFetchBuilder[T]) Exec() ([]T, error) {
 			s.lowerbound,
 			s.upperbound, true)
 	}
-}
-
-type SortedRequiresSeedingBuilder[T item.Blueprint] struct {
-	mainCtx       context.Context
-	sorted        *Sorted[T]
-	params        []string
-	processor     func(*T, []interface{})
-	processorArgs []interface{}
 }

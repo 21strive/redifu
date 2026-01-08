@@ -39,25 +39,25 @@ func (p *Page[T]) SetSortingReference(sortingReference string) {
 	p.sorted.SetSortingReference(sortingReference)
 }
 
-func (p *Page[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
+func (p *Page[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, page int64, param []string) {
 	param = append(param, strconv.FormatInt(page, 10))
-	p.sorted.SetExpiration(pipe, pipeCtx, param)
+	p.sorted.SetExpiration(ctx, pipe, param)
 }
 
-func (p *Page[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
+func (p *Page[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, page int64, param []string) {
 	param = append(param, strconv.FormatInt(page, 10))
-	p.sorted.SetBlankPage(pipe, pipeCtx, param)
+	p.sorted.SetBlankPage(ctx, pipe, param)
 }
 
-func (p *Page[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, page int64, param []string) {
+func (p *Page[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, page int64, param []string) {
 	key := joinParam(p.pageIndexKeyFormat, param)
 	member := redis.Z{
 		Score:  float64(page),
 		Member: strconv.FormatInt(page, 10),
 	}
 
-	pipe.ZAdd(pipeCtx, key, member)
-	pipe.Expire(pipeCtx, key, p.sorted.timeToLive)
+	pipe.ZAdd(ctx, key, member)
+	pipe.Expire(ctx, key, p.sorted.timeToLive)
 }
 
 func (p *Page[T]) AddRelation(identifier string, relationBase Relation) {
@@ -94,22 +94,37 @@ func (p *Page[T]) Fetch(page int64) *PageFetchBuilder[T] {
 	}
 }
 
-func (p *Page[T]) RequiresSeeding(page int64) *PageRequiresSeedingBuilder[T] {
-	return &PageRequiresSeedingBuilder[T]{
-		page:       p,
-		pageNumber: page,
-		params:     nil,
-	}
+func (f *Page[T]) RequiresSeeding(page int64, params ...string) (bool, error) {
+	param := append(params, strconv.FormatInt(page, 10))
+	return f.sorted.RequiresSeeding(param)
 }
 
-func (p *Page[T]) Purge() *PagePurgeBuilder[T] {
-	return &PagePurgeBuilder[T]{
-		page:   p,
-		params: nil,
+func (p *Page[T]) Purge(ctx context.Context, params ...string) error {
+	key := joinParam(p.pageIndexKeyFormat, params)
+
+	result := p.client.ZRange(ctx, key, 0, -1)
+	if result.Err() != nil {
+		return result.Err()
 	}
+
+	for _, member := range result.Val() {
+		newParam := append(params, member)
+		errPurge := p.sorted.Purge(newParam)
+		if errPurge != nil {
+			return errPurge
+		}
+	}
+
+	delPageIndex := p.client.Del(ctx, key)
+	if delPageIndex.Err() != nil {
+		return delPageIndex.Err()
+	}
+
+	return nil
 }
 
 type PageFetchBuilder[T item.Blueprint] struct {
+	mainCtx       context.Context
 	page          *Page[T]
 	pageNumber    int64
 	params        []string
@@ -129,56 +144,8 @@ func (f *PageFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), p
 }
 
 func (f *PageFetchBuilder[T]) Exec() ([]T, error) {
-	param := append(f.params, strconv.FormatInt(f.pageNumber, 10))
-	return f.page.sorted.Fetch(param, f.page.direction, f.processor, f.processorArgs)
-}
-
-type PageRequiresSeedingBuilder[T item.Blueprint] struct {
-	page       *Page[T]
-	pageNumber int64
-	params     []string
-}
-
-func (f *PageRequiresSeedingBuilder[T]) WithParams(params ...string) *PageRequiresSeedingBuilder[T] {
-	f.params = params
-	return f
-}
-
-func (f *PageRequiresSeedingBuilder[T]) Exec() (bool, error) {
-	param := append(f.params, strconv.FormatInt(f.pageNumber, 10))
-	return f.page.sorted.RequiresSeeding(param)
-}
-
-type PagePurgeBuilder[T item.Blueprint] struct {
-	page   *Page[T]
-	params []string
-}
-
-func (f *PagePurgeBuilder[T]) WithParams(params ...string) *PagePurgeBuilder[T] {
-	f.params = params
-	return f
-}
-
-func (f *PagePurgeBuilder[T]) Exec(ctx context.Context) error {
-	key := joinParam(f.page.pageIndexKeyFormat, f.params)
-
-	result := f.page.client.ZRange(ctx, key, 0, -1)
-	if result.Err() != nil {
-		return result.Err()
-	}
-
-	for _, member := range result.Val() {
-		newParam := append(f.params, member)
-		errPurge := f.page.sorted.Purge(newParam)
-		if errPurge != nil {
-			return errPurge
-		}
-	}
-
-	delPageIndex := f.page.client.Del(context.TODO(), key)
-	if delPageIndex.Err() != nil {
-		return delPageIndex.Err()
-	}
-
-	return nil
+	f.params = append(f.params, strconv.FormatInt(f.pageNumber, 10))
+	return f.page.sorted.Fetch(f.mainCtx, f.page.direction).
+		WithParams(f.params...).
+		WithProcessor(f.processor, f.processorArgs).Exec()
 }

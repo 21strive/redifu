@@ -28,7 +28,7 @@ func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat st
 	cr.sortedSetKeyFormat = sortedSetKeyFormat
 }
 
-func (cr *SortedSet[T]) SetItem(pipe redis.Pipeliner, ctx context.Context, param []string, score float64, item T) {
+func (cr *SortedSet[T]) SetItem(ctx context.Context, pipe redis.Pipeliner, param []string, score float64, item T) {
 	var key string
 	if param == nil {
 		key = cr.sortedSetKeyFormat
@@ -47,7 +47,7 @@ func (cr *SortedSet[T]) SetItem(pipe redis.Pipeliner, ctx context.Context, param
 		sortedSetMember)
 }
 
-func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context, param []string, timeToLive time.Duration) {
+func (cr *SortedSet[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, param []string, timeToLive time.Duration) {
 	var key string
 	if param == nil {
 		key = cr.sortedSetKeyFormat
@@ -62,7 +62,7 @@ func (cr *SortedSet[T]) SetExpiration(pipe redis.Pipeliner, ctx context.Context,
 	)
 }
 
-func (cr *SortedSet[T]) RemoveItem(pipe redis.Pipeliner, ctx context.Context, param []string, item T) error {
+func (cr *SortedSet[T]) RemoveItem(ctx context.Context, pipe redis.Pipeliner, param []string, item T) error {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	removeFromSortedSet := pipe.ZRem(
@@ -77,10 +77,10 @@ func (cr *SortedSet[T]) RemoveItem(pipe redis.Pipeliner, ctx context.Context, pa
 	return nil
 }
 
-func (cr *SortedSet[T]) Count(param []string) int64 {
+func (cr *SortedSet[T]) Count(ctx context.Context, param []string) int64 {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
-	getTotalItemSortedSet := cr.client.ZCard(context.TODO(), key)
+	getTotalItemSortedSet := cr.client.ZCard(ctx, key)
 	if getTotalItemSortedSet.Err() != nil {
 		return 0
 	}
@@ -88,7 +88,7 @@ func (cr *SortedSet[T]) Count(param []string) int64 {
 	return getTotalItemSortedSet.Val()
 }
 
-func (cr *SortedSet[T]) Delete(pipe redis.Pipeliner, ctx context.Context, param []string) error {
+func (cr *SortedSet[T]) Delete(ctx context.Context, pipe redis.Pipeliner, param []string) error {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
 	removeSortedSet := pipe.Del(ctx, key)
@@ -99,10 +99,10 @@ func (cr *SortedSet[T]) Delete(pipe redis.Pipeliner, ctx context.Context, param 
 	return nil
 }
 
-func (cr *SortedSet[T]) LowestScore(param []string) (float64, error) {
+func (cr *SortedSet[T]) LowestScore(ctx context.Context, param []string) (float64, error) {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
-	result, err := cr.client.ZRangeWithScores(context.TODO(), key, 0, 0).Result()
+	result, err := cr.client.ZRangeWithScores(ctx, key, 0, 0).Result()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get lowest score: %w", err)
 	}
@@ -114,10 +114,10 @@ func (cr *SortedSet[T]) LowestScore(param []string) (float64, error) {
 	return result[0].Score, nil
 }
 
-func (cr *SortedSet[T]) HighestScore(param []string) (float64, error) {
+func (cr *SortedSet[T]) HighestScore(ctx context.Context, param []string) (float64, error) {
 	key := joinParam(cr.sortedSetKeyFormat, param)
 
-	result, err := cr.client.ZRangeWithScores(context.TODO(), key, -1, -1).Result()
+	result, err := cr.client.ZRangeWithScores(ctx, key, -1, -1).Result()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get highest score: %w", err)
 	}
@@ -171,14 +171,14 @@ func (cr *SortedSet[T]) Fetch(
 	listRandIds := result.Val()
 
 	for i := 0; i < len(listRandIds); i++ {
-		item, err := baseClient.Get(listRandIds[i])
+		fetchedItem, err := baseClient.Get(ctx, listRandIds[i])
 		if err != nil {
 			continue
 		}
 
 		if relation != nil {
 			for _, relationFormat := range relation {
-				v := reflect.ValueOf(item)
+				v := reflect.ValueOf(fetchedItem)
 
 				if v.Kind() == reflect.Ptr {
 					v = v.Elem()
@@ -211,10 +211,10 @@ func (cr *SortedSet[T]) Fetch(
 			}
 		}
 		if processor != nil {
-			processor(&item, processorArgs)
+			processor(&fetchedItem, processorArgs)
 		}
 
-		items = append(items, item)
+		items = append(items, fetchedItem)
 	}
 
 	return items, nil
