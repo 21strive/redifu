@@ -28,12 +28,12 @@ func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat st
 	cr.sortedSetKeyFormat = sortedSetKeyFormat
 }
 
-func (cr *SortedSet[T]) SetItem(ctx context.Context, pipe redis.Pipeliner, param []string, score float64, item T) {
+func (cr *SortedSet[T]) SetItem(ctx context.Context, pipe redis.Pipeliner, score float64, item T, keyParams ...string) {
 	var key string
-	if param == nil {
+	if keyParams == nil {
 		key = cr.sortedSetKeyFormat
 	} else {
-		key = joinParam(cr.sortedSetKeyFormat, param)
+		key = joinParam(cr.sortedSetKeyFormat, keyParams)
 	}
 
 	sortedSetMember := redis.Z{
@@ -47,12 +47,12 @@ func (cr *SortedSet[T]) SetItem(ctx context.Context, pipe redis.Pipeliner, param
 		sortedSetMember)
 }
 
-func (cr *SortedSet[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, param []string, timeToLive time.Duration) {
+func (cr *SortedSet[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, timeToLive time.Duration, keyParams ...string) {
 	var key string
-	if param == nil {
+	if keyParams == nil {
 		key = cr.sortedSetKeyFormat
 	} else {
-		key = joinParam(cr.sortedSetKeyFormat, param)
+		key = joinParam(cr.sortedSetKeyFormat, keyParams)
 	}
 
 	pipe.Expire(
@@ -62,8 +62,8 @@ func (cr *SortedSet[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner,
 	)
 }
 
-func (cr *SortedSet[T]) RemoveItem(ctx context.Context, pipe redis.Pipeliner, param []string, item T) error {
-	key := joinParam(cr.sortedSetKeyFormat, param)
+func (cr *SortedSet[T]) RemoveItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
+	key := joinParam(cr.sortedSetKeyFormat, keyParams)
 
 	removeFromSortedSet := pipe.ZRem(
 		ctx,
@@ -77,8 +77,8 @@ func (cr *SortedSet[T]) RemoveItem(ctx context.Context, pipe redis.Pipeliner, pa
 	return nil
 }
 
-func (cr *SortedSet[T]) Count(ctx context.Context, param []string) int64 {
-	key := joinParam(cr.sortedSetKeyFormat, param)
+func (cr *SortedSet[T]) Count(ctx context.Context, keyParams ...string) int64 {
+	key := joinParam(cr.sortedSetKeyFormat, keyParams)
 
 	getTotalItemSortedSet := cr.client.ZCard(ctx, key)
 	if getTotalItemSortedSet.Err() != nil {
@@ -88,8 +88,8 @@ func (cr *SortedSet[T]) Count(ctx context.Context, param []string) int64 {
 	return getTotalItemSortedSet.Val()
 }
 
-func (cr *SortedSet[T]) Delete(ctx context.Context, pipe redis.Pipeliner, param []string) error {
-	key := joinParam(cr.sortedSetKeyFormat, param)
+func (cr *SortedSet[T]) Delete(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	key := joinParam(cr.sortedSetKeyFormat, keyParams)
 
 	removeSortedSet := pipe.Del(ctx, key)
 	if removeSortedSet.Err() != nil {
@@ -99,8 +99,8 @@ func (cr *SortedSet[T]) Delete(ctx context.Context, pipe redis.Pipeliner, param 
 	return nil
 }
 
-func (cr *SortedSet[T]) LowestScore(ctx context.Context, param []string) (float64, error) {
-	key := joinParam(cr.sortedSetKeyFormat, param)
+func (cr *SortedSet[T]) LowestScore(ctx context.Context, keyParams ...string) (float64, error) {
+	key := joinParam(cr.sortedSetKeyFormat, keyParams)
 
 	result, err := cr.client.ZRangeWithScores(ctx, key, 0, 0).Result()
 	if err != nil {
@@ -114,8 +114,8 @@ func (cr *SortedSet[T]) LowestScore(ctx context.Context, param []string) (float6
 	return result[0].Score, nil
 }
 
-func (cr *SortedSet[T]) HighestScore(ctx context.Context, param []string) (float64, error) {
-	key := joinParam(cr.sortedSetKeyFormat, param)
+func (cr *SortedSet[T]) HighestScore(ctx context.Context, keyParams ...string) (float64, error) {
+	key := joinParam(cr.sortedSetKeyFormat, keyParams)
 
 	result, err := cr.client.ZRangeWithScores(ctx, key, -1, -1).Result()
 	if err != nil {
@@ -132,19 +132,19 @@ func (cr *SortedSet[T]) HighestScore(ctx context.Context, param []string) (float
 func (cr *SortedSet[T]) Fetch(
 	ctx context.Context,
 	baseClient *Base[T],
-	param []string,
 	direction string,
 	processor func(item *T, args []interface{}),
 	processorArgs []interface{},
 	relation map[string]Relation,
 	start int64,
 	stop int64,
-	byScore bool) ([]T, error) {
+	byScore bool,
+	keyParams ...string) ([]T, error) {
 	var items []T
 	if direction == "" {
 		return nil, errors.New("must set direction!")
 	}
-	sortedSetKey := joinParam(cr.sortedSetKeyFormat, param)
+	sortedSetKey := joinParam(cr.sortedSetKeyFormat, keyParams)
 
 	var result *redis.StringSliceCmd
 	if byScore {
