@@ -17,6 +17,7 @@ type RowsScannerWithRelation[T SQLItemBlueprint] func(rows *sql.Rows, relation m
 
 type TimelineSeeder[T SQLItemBlueprint] struct {
 	db               *sql.DB
+	queryBuilder     *Builder
 	redis            redis.UniversalClient
 	baseClient       *Base[T]
 	paginationClient *Timeline[T]
@@ -74,18 +75,28 @@ func (s *TimelineSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], q
 }
 
 func (s *TimelineSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], rowsScanner RowsScanner[T]) error {
-	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
+	return s.PartialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	})
 }
 
 func (s *TimelineSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T]) error {
-	return s.partialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
+	return s.PartialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
 		return rowsScannerWithJoin(rows, s.paginationClient.relation)
 	})
 }
 
-func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], scanFunc func(*sql.Rows) (T, error)) error {
+func (s *TimelineSeeder[T]) Seed(ctx context.Context, subtraction int64, lastRandId string, queryBuilder Builder) *timelineSeedBuilder[T] {
+	return &timelineSeedBuilder[T]{
+		mainCtx:        ctx,
+		timelineSeeder: s,
+		subtraction:    subtraction,
+		lastRandId:     lastRandId,
+		queryBuilder:   &queryBuilder,
+	}
+}
+
+func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], scanFunc func(*sql.Rows) (T, error)) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -169,10 +180,49 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 	return nil
 }
 
-type timelineSeedBuilder[T item.Blueprint] struct {
-	timelineSeeder *Timeline[T]
-	queryArgs      []interface{}
-	keyParams      []string
+type timelineSeedBuilder[T SQLItemBlueprint] struct {
+	mainCtx             context.Context
+	timelineSeeder      *TimelineSeeder[T]
+	queryBuilder        *Builder
+	subtraction         int64
+	lastRandId          string
+	queryArgs           []interface{}
+	relation            map[string]Relation
+	rowScanner          RowScanner[T]
+	rowsScanner         RowsScanner[T]
+	rowsScannerWithJoin RowsScannerWithRelation[T]
+	keyParams           []string
+}
+
+func (t *timelineSeedBuilder[T]) WithQueryArgs(queryArgs ...interface{}) *timelineSeedBuilder[T] {
+	t.queryArgs = queryArgs
+	return t
+}
+
+func (t *timelineSeedBuilder[T]) WithParams(keyParams ...string) *timelineSeedBuilder[T] {
+	t.keyParams = keyParams
+	return t
+}
+
+func (t *timelineSeedBuilder[T]) WithRelation(relations map[string]Relation) *timelineSeedBuilder[T] {
+	t.relation = relations
+	return t
+}
+
+func (t *timelineSeedBuilder[T]) Exec() error {
+	return t.timelineSeeder.PartialSeed(
+		t.queryBuilder.Row("randid"),
+		t.queryBuilder.Base(),
+		t.queryBuilder.WithCursor(),
+		t.queryArgs,
+		t.subtraction,
+		t.lastRandId, t.keyParams, t.rowScanner, func(rows *sql.Rows) (T, error) {
+			if t.relation != nil {
+				return t.rowsScanner(rows)
+			} else {
+				return t.rowsScannerWithJoin(rows, t.relation)
+			}
+		})
 }
 
 type SortedSeeder[T SQLItemBlueprint] struct {
