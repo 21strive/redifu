@@ -39,18 +39,18 @@ func (p *Page[T]) SetSortingReference(sortingReference string) {
 	p.sorted.SetSortingReference(sortingReference)
 }
 
-func (p *Page[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, page int64, param []string) {
-	param = append(param, strconv.FormatInt(page, 10))
-	p.sorted.SetExpiration(ctx, pipe, param)
+func (p *Page[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) {
+	keyParams = append(keyParams, strconv.FormatInt(page, 10))
+	p.sorted.SetExpiration(ctx, pipe, keyParams...)
 }
 
-func (p *Page[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, page int64, param []string) {
-	param = append(param, strconv.FormatInt(page, 10))
-	p.sorted.SetBlankPage(ctx, pipe, param)
+func (p *Page[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) {
+	keyParams = append(keyParams, strconv.FormatInt(page, 10))
+	p.sorted.SetBlankPage(ctx, pipe, keyParams...)
 }
 
-func (p *Page[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, page int64, param []string) {
-	key := joinParam(p.pageIndexKeyFormat, param)
+func (p *Page[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) {
+	key := joinParam(p.pageIndexKeyFormat, keyParams)
 	member := redis.Z{
 		Score:  float64(page),
 		Member: strconv.FormatInt(page, 10),
@@ -67,9 +67,9 @@ func (p *Page[T]) AddRelation(identifier string, relationBase Relation) {
 	p.relation[identifier] = relationBase
 }
 
-func (p *Page[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, page int64, param []string) error {
-	param = append(param, strconv.FormatInt(page, 10))
-	return p.sorted.IngestItem(pipe, pipeCtx, item, param, true)
+func (p *Page[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, page int64, keyParams ...string) error {
+	keyParams = append(keyParams, strconv.FormatInt(page, 10))
+	return p.sorted.IngestItem(ctx, pipe, item, true, keyParams...)
 }
 
 func (p *Page[T]) GetRelation() map[string]Relation {
@@ -84,8 +84,8 @@ func (p *Page[T]) GetSorted() *Sorted[T] {
 	return p.sorted
 }
 
-func (p *Page[T]) Fetch(page int64) *PageFetchBuilder[T] {
-	return &PageFetchBuilder[T]{
+func (p *Page[T]) Fetch(page int64) *pageFetchBuilder[T] {
+	return &pageFetchBuilder[T]{
 		page:          p,
 		pageNumber:    page,
 		params:        nil,
@@ -94,13 +94,13 @@ func (p *Page[T]) Fetch(page int64) *PageFetchBuilder[T] {
 	}
 }
 
-func (f *Page[T]) RequiresSeeding(page int64, params ...string) (bool, error) {
-	param := append(params, strconv.FormatInt(page, 10))
-	return f.sorted.RequiresSeeding(param)
+func (f *Page[T]) RequiresSeeding(ctx context.Context, page int64, keyParams ...string) (bool, error) {
+	keyParams = append(keyParams, strconv.FormatInt(page, 10))
+	return f.sorted.RequiresSeeding(ctx, keyParams...)
 }
 
-func (p *Page[T]) Purge(ctx context.Context, params ...string) error {
-	key := joinParam(p.pageIndexKeyFormat, params)
+func (p *Page[T]) Purge(ctx context.Context, keyParams ...string) error {
+	key := joinParam(p.pageIndexKeyFormat, keyParams)
 
 	result := p.client.ZRange(ctx, key, 0, -1)
 	if result.Err() != nil {
@@ -108,8 +108,8 @@ func (p *Page[T]) Purge(ctx context.Context, params ...string) error {
 	}
 
 	for _, member := range result.Val() {
-		newParam := append(params, member)
-		errPurge := p.sorted.Purge(newParam)
+		newParams := append(keyParams, member)
+		errPurge := p.sorted.Purge(ctx).WithParams(newParams...).Exec()
 		if errPurge != nil {
 			return errPurge
 		}
@@ -123,7 +123,7 @@ func (p *Page[T]) Purge(ctx context.Context, params ...string) error {
 	return nil
 }
 
-type PageFetchBuilder[T item.Blueprint] struct {
+type pageFetchBuilder[T item.Blueprint] struct {
 	mainCtx       context.Context
 	page          *Page[T]
 	pageNumber    int64
@@ -132,18 +132,18 @@ type PageFetchBuilder[T item.Blueprint] struct {
 	processorArgs []interface{}
 }
 
-func (f *PageFetchBuilder[T]) WithParams(params ...string) *PageFetchBuilder[T] {
-	f.params = params
+func (f *pageFetchBuilder[T]) WithParams(keyParams ...string) *pageFetchBuilder[T] {
+	f.params = keyParams
 	return f
 }
 
-func (f *PageFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), processorArgs ...interface{}) *PageFetchBuilder[T] {
+func (f *pageFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), processorArgs ...interface{}) *pageFetchBuilder[T] {
 	f.processor = processor
 	f.processorArgs = processorArgs
 	return f
 }
 
-func (f *PageFetchBuilder[T]) Exec() ([]T, error) {
+func (f *pageFetchBuilder[T]) Exec() ([]T, error) {
 	f.params = append(f.params, strconv.FormatInt(f.pageNumber, 10))
 	return f.page.sorted.Fetch(f.mainCtx, f.page.direction).
 		WithParams(f.params...).

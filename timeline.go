@@ -61,8 +61,8 @@ func (cr *Timeline[T]) SetSortingReference(sortingReference string) {
 	cr.sortingReference = sortingReference
 }
 
-func (cr *Timeline[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, sortedSetParam []string) {
-	cr.sortedSetClient.SetExpiration(pipe, pipeCtx, sortedSetParam, cr.timeToLive)
+func (cr *Timeline[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	cr.sortedSetClient.SetExpiration(ctx, pipe, cr.timeToLive, keyParams...)
 }
 
 func (cr *Timeline[T]) GetItemPerPage() int64 {
@@ -73,7 +73,7 @@ func (cr *Timeline[T]) GetDirection() string {
 	return cr.direction
 }
 
-func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParam []string) error {
+func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
 	_, errGet := cr.baseClient.Get(ctx, item.GetRandId())
 	if errGet != nil && errGet != redis.Nil {
 		return errGet
@@ -87,15 +87,15 @@ func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParam []string) e
 		}
 	}
 
-	errIngest := cr.IngestItem(pipe, item, keyParam, false)
+	errIngest := cr.IngestItem(ctx, pipe, item, false, keyParams...)
 	if errIngest != nil {
 		return errIngest
 	}
-	_, errPipe := pipe.Exec(pipeCtx)
+	_, errPipe := pipe.Exec(ctx)
 	return errPipe
 }
 
-func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParam []string, seed bool) error {
+func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, seed bool, keyParams ...string) error {
 	if cr.direction == "" {
 		return errors.New("must set direction!")
 	}
@@ -105,108 +105,112 @@ func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 		return err
 	}
 
-	isFirstPage, err := cr.IsFirstPage(keyParam)
+	isFirstPage, err := cr.IsFirstPage(ctx, keyParams...)
 	if err != nil {
 		return err
 	}
 
-	isLastPage, err := cr.IsLastPage(keyParam)
+	isLastPage, err := cr.IsLastPage(ctx, keyParams...)
 	if err != nil {
 		return err
 	}
 
 	if !seed {
-		isBlankPage, errGet := cr.IsBlankPage(keyParam)
+		isBlankPage, errGet := cr.IsBlankPage(ctx, keyParams...)
 		if errGet != nil {
 			return errGet
 		}
 		if isBlankPage {
-			cr.DelBlankPage(pipe, pipeCtx, keyParam)
+			cr.DelBlankPage(ctx, pipe, keyParams...)
 		}
 
 		if cr.direction == Descending {
-			if cr.sortedSetClient.Count(keyParam) > 0 {
-				lowestScore, err := cr.sortedSetClient.LowestScore(keyParam)
+			elementCount := cr.sortedSetClient.Count(ctx, keyParams...)
+			if elementCount > 0 {
+				lowestScore, err := cr.sortedSetClient.LowestScore(ctx, keyParams...)
 				if err != nil {
 					return err
 				}
 
 				if score >= lowestScore {
-					if cr.sortedSetClient.Count(keyParam) == cr.itemPerPage && isFirstPage {
-						cr.DelFirstPage(pipe, pipeCtx, keyParam)
+					if elementCount == cr.itemPerPage && isFirstPage {
+						cr.DelFirstPage(ctx, pipe, keyParams...)
 					}
-					cr.sortedSetClient.SetItem(pipe, pipeCtx, keyParam, score, item)
+					cr.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
 				}
 			}
 		} else if cr.direction == Ascending {
-			if cr.sortedSetClient.Count(keyParam) > 0 {
-				highestScore, err := cr.sortedSetClient.HighestScore(keyParam)
+			elementCount := cr.sortedSetClient.Count(ctx, keyParams...)
+			if elementCount > 0 {
+				highestScore, err := cr.sortedSetClient.HighestScore(ctx, keyParams...)
 				if err != nil {
 					return err
 				}
 
 				if score <= highestScore {
-					if cr.sortedSetClient.Count(keyParam) == cr.itemPerPage && isFirstPage {
-						cr.DelFirstPage(pipe, pipeCtx, keyParam)
+					if elementCount == cr.itemPerPage && isFirstPage {
+						cr.DelFirstPage(ctx, pipe, keyParams...)
 					}
 					if isFirstPage || isLastPage {
-						cr.sortedSetClient.SetItem(pipe, pipeCtx, keyParam, score, item)
+						cr.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
 					}
 				}
 			}
 		}
 	} else {
-		cr.sortedSetClient.SetItem(pipe, pipeCtx, keyParam, score, item)
+		cr.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
 	}
 
 	return nil
 }
 
-func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, param []string) error {
-	pipeCtx := context.Background()
+func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
 	pipe := cr.client.Pipeline()
 
-	errDelBase := cr.baseClient.Del(pipe, pipeCtx, item)
+	errDelBase := cr.baseClient.Del(ctx, pipe, item)
 	if errDelBase != nil {
 		return errDelBase
 	}
 
-	err := cr.sortedSetClient.RemoveItem(pipe, pipeCtx, param, item)
+	err := cr.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...)
+	if err != nil {
+		return err
+	}
 	if err != nil {
 		return err
 	}
 
-	isFirstPage, errFirstPage := cr.IsFirstPage(param)
+	isFirstPage, errFirstPage := cr.IsFirstPage(ctx, keyParams...)
 	if errFirstPage != nil {
 		return errFirstPage
 	}
 	if isFirstPage {
-		numItem := cr.sortedSetClient.Count(param) // O(log(n))
+		numItem := cr.sortedSetClient.Count(ctx, keyParams...) // O(log(n))
 		if numItem == 0 {
-			cr.DelFirstPage(pipe, pipeCtx, param)
+			cr.DelFirstPage(ctx, pipe, keyParams...)
 		}
 	}
 
-	isLastPage, errLastPage := cr.IsLastPage(param)
+	isLastPage, errLastPage := cr.IsLastPage(ctx, keyParams...)
 	if errLastPage != nil {
 		return errLastPage
 	}
 	if isLastPage {
-		numItem := cr.sortedSetClient.Count(param)
+		numItem := cr.sortedSetClient.Count(ctx, keyParams...)
 		if numItem == 0 {
-			cr.DelLastPage(pipe, pipeCtx, param)
+			cr.DelLastPage(ctx, pipe, keyParams...)
 		}
 	}
 
-	_, errPipe := pipe.Exec(pipeCtx)
+	_, errPipe := pipe.Exec(ctx)
 	return errPipe
 }
 
-func (cr *Timeline[T]) IsFirstPage(ctx context.Context, param []string) (bool, error) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) IsFirstPage(ctx context.Context, keyParams ...string) (bool, error) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	firstPageKey := sortedSetKey + ":firstpage"
 
-	getFirstPageKey := cr.client.Get(context.TODO(), firstPageKey)
+	getFirstPageKey := cr.client.Get(ctx, firstPageKey)
 	if getFirstPageKey.Err() != nil {
 		if getFirstPageKey.Err() == redis.Nil {
 			return false, nil
@@ -221,8 +225,8 @@ func (cr *Timeline[T]) IsFirstPage(ctx context.Context, param []string) (bool, e
 	return false, nil
 }
 
-func (cr *Timeline[T]) SetFirstPage(ctx context.Context, pipe redis.Pipeliner, param []string) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) SetFirstPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	firstPageKey := sortedSetKey + ":firstpage"
 
 	pipe.Set(
@@ -233,18 +237,18 @@ func (cr *Timeline[T]) SetFirstPage(ctx context.Context, pipe redis.Pipeliner, p
 	)
 }
 
-func (cr *Timeline[T]) DelFirstPage(ctx context.Context, pipe redis.Pipeliner, param []string) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) DelFirstPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	firstPageKey := sortedSetKey + ":firstpage"
 
 	pipe.Del(ctx, firstPageKey)
 }
 
-func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) IsLastPage(ctx context.Context, keyParams ...string) (bool, error) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":lastpage"
 
-	getLastPageKey := cr.client.Get(context.TODO(), lastPageKey)
+	getLastPageKey := cr.client.Get(ctx, lastPageKey)
 	if getLastPageKey.Err() != nil {
 		if getLastPageKey.Err() == redis.Nil {
 			return false, nil
@@ -259,8 +263,8 @@ func (cr *Timeline[T]) IsLastPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Timeline[T]) SetLastPage(ctx context.Context, pipe redis.Pipeliner, param []string) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) SetLastPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":lastpage"
 
 	pipe.Set(
@@ -271,18 +275,18 @@ func (cr *Timeline[T]) SetLastPage(ctx context.Context, pipe redis.Pipeliner, pa
 	)
 }
 
-func (cr *Timeline[T]) DelLastPage(ctx context.Context, pipe redis.Pipeliner, param []string) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) DelLastPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":lastpage"
 
 	pipe.Del(ctx, lastPageKey)
 }
 
-func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) IsBlankPage(ctx context.Context, keyParams ...string) (bool, error) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	blankPageKey := sortedSetKey + ":blankpage"
 
-	getLastPageKey := cr.client.Get(context.TODO(), blankPageKey)
+	getLastPageKey := cr.client.Get(ctx, blankPageKey)
 	if getLastPageKey.Err() != nil {
 		if getLastPageKey.Err() == redis.Nil {
 			return false, nil
@@ -297,8 +301,8 @@ func (cr *Timeline[T]) IsBlankPage(param []string) (bool, error) {
 	return false, nil
 }
 
-func (cr *Timeline[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, param []string) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	pipe.Set(
@@ -309,15 +313,15 @@ func (cr *Timeline[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, p
 	)
 }
 
-func (cr *Timeline[T]) DelBlankPage(ctx context.Context, pipe redis.Pipeliner, param []string) {
-	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, param)
+func (cr *Timeline[T]) DelBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	pipe.Del(ctx, lastPageKey)
 }
 
-func (cr *Timeline[T]) Fetch(ctx context.Context, lastRandId []string) *TimelineFetchBuilder[T] {
-	return &TimelineFetchBuilder[T]{
+func (cr *Timeline[T]) Fetch(ctx context.Context, lastRandId []string) *timelineFetchBuilder[T] {
+	return &timelineFetchBuilder[T]{
 		mainCtx:       ctx,
 		timeline:      cr,
 		lastRandIds:   lastRandId,
@@ -328,8 +332,8 @@ func (cr *Timeline[T]) Fetch(ctx context.Context, lastRandId []string) *Timeline
 	}
 }
 
-func (cr *Timeline[T]) FetchAll(ctx context.Context) *TimelineFetchBuilder[T] {
-	return &TimelineFetchBuilder[T]{
+func (cr *Timeline[T]) FetchAll(ctx context.Context) *timelineFetchBuilder[T] {
+	return &timelineFetchBuilder[T]{
 		mainCtx:       ctx,
 		timeline:      cr,
 		lastRandIds:   nil,
@@ -340,8 +344,8 @@ func (cr *Timeline[T]) FetchAll(ctx context.Context) *TimelineFetchBuilder[T] {
 	}
 }
 
-func (cr *Timeline[T]) Remove(ctx context.Context) *TimelineRemovalBuilder[T] {
-	return &TimelineRemovalBuilder[T]{
+func (cr *Timeline[T]) Remove(ctx context.Context) *timelineRemovalBuilder[T] {
+	return &timelineRemovalBuilder[T]{
 		mainCtx:  ctx,
 		timeline: cr,
 		params:   nil,
@@ -349,8 +353,8 @@ func (cr *Timeline[T]) Remove(ctx context.Context) *TimelineRemovalBuilder[T] {
 	}
 }
 
-func (cr *Timeline[T]) Purge(ctx context.Context) *TimelineRemovalBuilder[T] {
-	return &TimelineRemovalBuilder[T]{
+func (cr *Timeline[T]) Purge(ctx context.Context) *timelineRemovalBuilder[T] {
+	return &timelineRemovalBuilder[T]{
 		mainCtx:  ctx,
 		timeline: cr,
 		params:   nil,
@@ -358,7 +362,7 @@ func (cr *Timeline[T]) Purge(ctx context.Context) *TimelineRemovalBuilder[T] {
 	}
 }
 
-type TimelineFetchBuilder[T item.Blueprint] struct {
+type timelineFetchBuilder[T item.Blueprint] struct {
 	mainCtx       context.Context
 	timeline      *Timeline[T]
 	lastRandIds   []string
@@ -368,18 +372,18 @@ type TimelineFetchBuilder[T item.Blueprint] struct {
 	fetchAll      bool
 }
 
-func (b *TimelineFetchBuilder[T]) WithParams(params ...string) *TimelineFetchBuilder[T] {
+func (b *timelineFetchBuilder[T]) WithParams(params ...string) *timelineFetchBuilder[T] {
 	b.params = params
 	return b
 }
 
-func (b *TimelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), args ...interface{}) *TimelineFetchBuilder[T] {
+func (b *timelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), args ...interface{}) *timelineFetchBuilder[T] {
 	b.processor = processor
 	b.processorArgs = args
 	return b
 }
 
-func (b *TimelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
+func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 	var items []T
 	var validLastRandId string
 	var position string
@@ -402,7 +406,7 @@ func (b *TimelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 			return nil, validLastRandId, position, ResetPagination
 		}
 
-		item, err := b.timeline.baseClient.Get(b.lastRandIds[i])
+		item, err := b.timeline.baseClient.Get(b.mainCtx, b.lastRandIds[i])
 		if err != nil {
 			continue
 		}
@@ -432,14 +436,14 @@ func (b *TimelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 	items, errFetch := b.timeline.sortedSetClient.Fetch(
 		b.mainCtx,
 		b.timeline.baseClient,
-		b.params,
 		b.timeline.direction,
 		b.processor,
 		b.processorArgs,
 		b.timeline.relation,
 		start,
 		stop,
-		false)
+		false,
+		b.params...)
 	if errFetch != nil {
 		return nil, validLastRandId, position, errFetch
 	}
@@ -455,61 +459,59 @@ func (b *TimelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 	return items, validLastRandId, position, nil
 }
 
-func (b *Timeline[T]) RequiresSeeding(ctx context.Context, keyParams ...string) (bool, error) {
-	sortedSetKey := joinParam(b.timeline.sortedSetClient.sortedSetKeyFormat, b.params)
-	count, errZCard := b.timeline.client.ZCard(b.mainCtx, sortedSetKey).Result()
+func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, keyParams ...string) (bool, error) {
+	sortedSetKey := joinParam(b.sortedSetClient.sortedSetKeyFormat, keyParams)
+	count, errZCard := b.client.ZCard(ctx, sortedSetKey).Result()
 	if errZCard != nil {
 		return false, errZCard
 	}
 	if count == 0 {
-		pipeCtx := context.Background()
-		pipeline := b.timeline.client.Pipeline()
+		pipeline := b.client.Pipeline()
 
-		b.timeline.DelLastPage(pipeline, pipeCtx, b.params)
-		b.timeline.DelFirstPage(pipeline, pipeCtx, b.params)
+		b.DelLastPage(ctx, pipeline, keyParams...)
+		b.DelFirstPage(ctx, pipeline, keyParams...)
 
-		_, errPipe := pipeline.Exec(pipeCtx)
+		_, errPipe := pipeline.Exec(ctx)
 		if errPipe != nil {
 			return false, errPipe
 		}
 	}
 
-	isBlankPage, err := b.timeline.IsBlankPage(b.params)
+	isBlankPage, err := b.IsBlankPage(ctx, keyParams...)
 	if err != nil {
 		return false, err
 	}
 
-	isFirstPage, err := b.timeline.IsFirstPage(b.params)
+	isFirstPage, err := b.IsFirstPage(ctx, keyParams...)
 	if err != nil {
 		return false, err
 	}
 
-	isLastPage, err := b.timeline.IsLastPage(b.params)
+	isLastPage, err := b.IsLastPage(ctx, keyParams...)
 	if err != nil {
 		return false, err
 	}
 
-	if !isBlankPage && !isFirstPage && !isLastPage && b.totalItems < b.timeline.itemPerPage {
+	if !isBlankPage && !isFirstPage && !isLastPage && totalItems < b.itemPerPage {
 		return true, nil
 	} else {
 		return false, nil
 	}
 }
 
-type TimelineRemovalBuilder[T item.Blueprint] struct {
+type timelineRemovalBuilder[T item.Blueprint] struct {
 	mainCtx  context.Context
 	timeline *Timeline[T]
 	params   []string
 	purge    bool
 }
 
-func (t *TimelineRemovalBuilder[T]) WithParams(params ...string) *TimelineRemovalBuilder[T] {
+func (t *timelineRemovalBuilder[T]) WithParams(params ...string) *timelineRemovalBuilder[T] {
 	t.params = params
 	return t
 }
 
-func (t *TimelineRemovalBuilder[T]) Exec() error {
-	pipeCtx := context.Background()
+func (t *timelineRemovalBuilder[T]) Exec() error {
 	pipe := t.timeline.client.Pipeline()
 
 	if t.purge {
@@ -519,19 +521,19 @@ func (t *TimelineRemovalBuilder[T]) Exec() error {
 		}
 
 		for _, item := range items {
-			t.timeline.baseClient.Del(pipe, pipeCtx, item)
+			t.timeline.baseClient.Del(t.mainCtx, pipe, item)
 		}
 	}
 
-	err := t.timeline.sortedSetClient.Delete(pipe, pipeCtx, t.params)
+	err := t.timeline.sortedSetClient.Delete(t.mainCtx, pipe, t.params...)
 	if err != nil {
 		return err
 	}
 
-	t.timeline.DelFirstPage(pipe, pipeCtx, t.params)
-	t.timeline.DelLastPage(pipe, pipeCtx, t.params)
-	t.timeline.DelBlankPage(pipe, pipeCtx, t.params)
+	t.timeline.DelFirstPage(t.mainCtx, pipe, t.params...)
+	t.timeline.DelLastPage(t.mainCtx, pipe, t.params...)
+	t.timeline.DelBlankPage(t.mainCtx, pipe, t.params...)
 
-	_, errPipe := pipe.Exec(pipeCtx)
+	_, errPipe := pipe.Exec(t.mainCtx)
 	return errPipe
 }

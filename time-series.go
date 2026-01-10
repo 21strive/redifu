@@ -34,15 +34,15 @@ func NewTimeSeries[T item.Blueprint](
 	}
 }
 
-func (s *TimeSeries[T]) SetExpiration(pipe redis.Pipeliner, pipeCtx context.Context, keyParam []string) {
-	s.sorted.SetExpiration(pipe, pipeCtx, keyParam)
+func (s *TimeSeries[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
+	s.sorted.SetExpiration(ctx, pipe, keyParam...)
 }
 
-func (s *TimeSeries[T]) Count(keyParam []string) int64 {
-	return s.sorted.Count(keyParam)
+func (s *TimeSeries[T]) Count(ctx context.Context, keyParams ...string) int64 {
+	return s.sorted.Count(ctx, keyParams...)
 }
 
-func (s *TimeSeries[T]) AddItem(item T, keyParam []string) error {
+func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParam ...string) error {
 	itemScore, errGetScore := getItemScore(item, s.sorted.sortingReference)
 	if errGetScore != nil {
 		return errGetScore
@@ -50,12 +50,12 @@ func (s *TimeSeries[T]) AddItem(item T, keyParam []string) error {
 
 	// Convert item score to time for TimeSeries operations
 	itemTime := time.UnixMilli(int64(itemScore)).UTC()
-	segment, errScan := s.Scan(itemTime, itemTime, keyParam)
+	segment, errScan := s.Scan(ctx, itemTime, itemTime, keyParam)
 	if errScan != nil {
 		return errScan
 	}
 	if segment != nil && len(*segment) == 1 {
-		errAdd := s.sorted.AddItem(item, keyParam)
+		errAdd := s.sorted.AddItem(ctx, item, keyParam...)
 		if errAdd != nil {
 			return errAdd
 		}
@@ -65,18 +65,18 @@ func (s *TimeSeries[T]) AddItem(item T, keyParam []string) error {
 	return nil
 }
 
-func (s *TimeSeries[T]) IngestItem(pipe redis.Pipeliner, pipeCtx context.Context, item T, sortedSetParam []string) error {
-	return s.sorted.IngestItem(pipe, pipeCtx, item, sortedSetParam, true)
+func (s *TimeSeries[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
+	return s.sorted.IngestItem(ctx, pipe, item, true, keyParams...)
 }
 
-func (s *TimeSeries[T]) RemoveItem(item T, keyParam []string) error {
-	return s.sorted.RemoveItem(item, keyParam)
+func (s *TimeSeries[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
+	return s.sorted.RemoveItem(ctx, item, keyParams...)
 }
 
 // AddPage stores a seeded segment range in the segment store
 // Validates that the new segment doesn't overlap with any existing segment
 // Segments are stored in Redis Hash: field = lowerbound (string), value = upperbound (string)
-func (s *TimeSeries[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, lowerbound time.Time, upperbound time.Time, segmentStoreKeyParam []string) error {
+func (s *TimeSeries[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, lowerbound time.Time, upperbound time.Time, segmentStoreKeyParams ...string) error {
 	if !lowerbound.Before(upperbound) {
 		return fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
 	}
@@ -86,28 +86,28 @@ func (s *TimeSeries[T]) AddPage(pipe redis.Pipeliner, pipeCtx context.Context, l
 	upperboundUnix := upperbound.UnixMilli()
 
 	// Validate no overlap with existing segments
-	if err := s.validateNoOverlap(lowerbound, upperbound, segmentStoreKeyParam); err != nil {
+	if err := s.validateNoOverlap(ctx, lowerbound, upperbound, segmentStoreKeyParams...); err != nil {
 		return err
 	}
 
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, segmentStoreKeyParam)
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, segmentStoreKeyParams)
 
-	pipe.HSet(pipeCtx, segmentStoreKey, fmt.Sprintf("%d", lowerboundUnix), upperboundUnix)
+	pipe.HSet(ctx, segmentStoreKey, fmt.Sprintf("%d", lowerboundUnix), upperboundUnix)
 
 	if s.timeToLive > 0 {
-		pipe.Expire(pipeCtx, segmentStoreKey, s.timeToLive)
+		pipe.Expire(ctx, segmentStoreKey, s.timeToLive)
 	}
 
-	_, err := pipe.Exec(pipeCtx)
+	_, err := pipe.Exec(ctx)
 	return err
 }
 
 // validateNoOverlap ensures the new segment doesn't overlap with any existing segment
 // Two segments [a,b] and [c,d] overlap if: b > c AND d > a
-func (s *TimeSeries[T]) validateNoOverlap(lowerbound time.Time, upperbound time.Time, keyParam []string) error {
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
+func (s *TimeSeries[T]) validateNoOverlap(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParams ...string) error {
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParams)
 
-	result, err := s.redis.HGetAll(context.TODO(), segmentStoreKey).Result()
+	result, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()
 	if err != nil {
 		return fmt.Errorf("failed to get segments: %w", err)
 	}
@@ -139,7 +139,7 @@ func (s *TimeSeries[T]) validateNoOverlap(lowerbound time.Time, upperbound time.
 // Scan retrieves all segments that intersect with the specified range
 // For inclusive intervals [a,b] and [c,d], they intersect if: upper > lowerbound AND lower < upperbound
 // Returns segments sorted by lower bound
-func (s *TimeSeries[T]) Scan(lowerbound time.Time, upperbound time.Time, keyParam []string) (*[][]int64, error) {
+func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParam []string) (*[][]int64, error) {
 	if !lowerbound.Before(upperbound) {
 		return nil, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
 	}
@@ -150,7 +150,7 @@ func (s *TimeSeries[T]) Scan(lowerbound time.Time, upperbound time.Time, keyPara
 
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
 
-	result, err := s.redis.HGetAll(context.TODO(), segmentStoreKey).Result()
+	result, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get segments: %w", err)
 	}
@@ -181,12 +181,12 @@ func (s *TimeSeries[T]) Scan(lowerbound time.Time, upperbound time.Time, keyPara
 
 // FindGap identifies gaps between seeded segments within the specified range
 // Since segments are guaranteed non-overlapping (enforced by AddPage), no merging is needed
-func (s *TimeSeries[T]) FindGap(lowerbound time.Time, upperbound time.Time, keyParam []string) ([][]int64, error) {
+func (s *TimeSeries[T]) FindGap(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParam []string) ([][]int64, error) {
 	if !lowerbound.Before(upperbound) {
 		return [][]int64{}, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
 	}
 
-	segments, err := s.Scan(lowerbound, upperbound, keyParam)
+	segments, err := s.Scan(ctx, lowerbound, upperbound, keyParam)
 	if err != nil {
 		return nil, err
 	}
@@ -235,42 +235,25 @@ func (s *TimeSeries[T]) calculateGaps(segments [][]int64, lowerbound, upperbound
 }
 
 // Fetch retrieves data from seeded segments within the specified range
-func (s *TimeSeries[T]) Fetch(lowerbound time.Time, upperbound time.Time, param []string, processor func(item *T, args []interface{}), processorArgs []interface{}) ([]T, bool, error) {
-	if !lowerbound.Before(upperbound) {
-		return nil, false, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
+func (s *TimeSeries[T]) Fetch(ctx context.Context, lowerbound time.Time, upperbound time.Time) *fetchTimeSeriesBuilder[T] {
+	return &fetchTimeSeriesBuilder[T]{
+		mainCtx:    ctx,
+		lowerbound: lowerbound,
+		upperbound: upperbound,
 	}
-
-	gaps, errFindGaps := s.FindGap(lowerbound, upperbound, param)
-	if errFindGaps != nil {
-		return nil, false, errFindGaps
-	}
-	if len(gaps) > 0 {
-		return nil, true, nil
-	}
-
-	// Convert to Unix timestamps for sorted set operations
-	lowerboundUnix := lowerbound.UnixMilli()
-	upperboundUnix := upperbound.UnixMilli()
-
-	result, errFetch := s.sorted.FetchByScore(param, Descending, lowerboundUnix, upperboundUnix, processor, processorArgs)
-	if errFetch != nil {
-		return nil, false, errFetch
-	}
-
-	return result, false, nil
 }
 
 // Remove deletes a segment from the segment store by its lowerbound
-func (s *TimeSeries[T]) Remove(lowerbound time.Time, segmentStoreKeyParam []string) error {
+func (s *TimeSeries[T]) Remove(ctx context.Context, lowerbound time.Time, segmentStoreKeyParam []string) error {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, segmentStoreKeyParam)
-	return s.redis.HDel(context.TODO(), segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Err()
+	return s.redis.HDel(ctx, segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Err()
 }
 
 // GetAllSegments retrieves all stored segments, sorted by lower bound
-func (s *TimeSeries[T]) GetAllSegments(keyParam []string) ([][]int64, error) {
+func (s *TimeSeries[T]) GetAllSegments(ctx context.Context, keyParam []string) ([][]int64, error) {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
 
-	result, err := s.redis.HGetAll(context.TODO(), segmentStoreKey).Result()
+	result, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -296,13 +279,63 @@ func (s *TimeSeries[T]) GetAllSegments(keyParam []string) ([][]int64, error) {
 }
 
 // Exists checks if a segment with the given lowerbound exists
-func (s *TimeSeries[T]) Exists(lowerbound time.Time, keyParam []string) (bool, error) {
+func (s *TimeSeries[T]) Exists(ctx context.Context, lowerbound time.Time, keyParam []string) (bool, error) {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
-	return s.redis.HExists(context.TODO(), segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Result()
+	return s.redis.HExists(ctx, segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Result()
 }
 
 // Count returns the total number of segments stored
-func (s *TimeSeries[T]) CountSegments(keyParam []string) (int64, error) {
+func (s *TimeSeries[T]) CountSegments(ctx context.Context, keyParam []string) (int64, error) {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
-	return s.redis.HLen(context.TODO(), segmentStoreKey).Result()
+	return s.redis.HLen(ctx, segmentStoreKey).Result()
+}
+
+type fetchTimeSeriesBuilder[T item.Blueprint] struct {
+	mainCtx       context.Context
+	timeSeries    *TimeSeries[T]
+	lowerbound    time.Time
+	upperbound    time.Time
+	keyParams     []string
+	processor     func(item *T, args []interface{})
+	processorArgs []interface{}
+}
+
+func (f *fetchTimeSeriesBuilder[T]) WithKeyParams(keyParams ...string) *fetchTimeSeriesBuilder[T] {
+	f.keyParams = keyParams
+	return f
+}
+
+func (f *fetchTimeSeriesBuilder[T]) WithProcessor(processor func(item *T, args []interface{}), processorArgs ...interface{}) *fetchTimeSeriesBuilder[T] {
+	f.processor = processor
+	f.processorArgs = processorArgs
+	return f
+}
+
+func (f *fetchTimeSeriesBuilder[T]) Exec() ([]T, bool, error) {
+	if !f.lowerbound.Before(f.upperbound) {
+		return nil, false, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", f.lowerbound.Format(time.RFC3339), f.upperbound.Format(time.RFC3339))
+	}
+
+	gaps, errFindGaps := f.timeSeries.FindGap(f.mainCtx, f.lowerbound, f.upperbound, f.keyParams)
+	if errFindGaps != nil {
+		return nil, false, errFindGaps
+	}
+	if len(gaps) > 0 {
+		return nil, true, nil
+	}
+
+	// Convert to Unix timestamps for sorted set operations
+	lowerboundUnix := f.lowerbound.UnixMilli()
+	upperboundUnix := f.upperbound.UnixMilli()
+
+	result, errFetch := f.timeSeries.sorted.Fetch(f.mainCtx, Descending).
+		WithParams(f.keyParams...).
+		WithRange(lowerboundUnix, upperboundUnix).
+		WithProcessor(f.processor, f.processorArgs).
+		Exec()
+	if errFetch != nil {
+		return nil, false, errFetch
+	}
+
+	return result, false, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 	"strconv"
 	"time"
@@ -166,6 +167,12 @@ func (s *TimelineSeeder[T]) partialSeed(rowQuery string, firstPageQuery string, 
 	}
 
 	return nil
+}
+
+type timelineSeedBuilder[T item.Blueprint] struct {
+	timelineSeeder *Timeline[T]
+	queryArgs      []interface{}
+	keyParams      []string
 }
 
 type SortedSeeder[T SQLItemBlueprint] struct {

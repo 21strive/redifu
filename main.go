@@ -1,6 +1,7 @@
 package redifu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/21strive/item"
@@ -92,8 +93,8 @@ type RelationFormat[T item.Blueprint] struct {
 }
 
 // Implement Relation interface
-func (r *RelationFormat[T]) GetByRandId(randId string) (interface{}, error) {
-	return r.base.Get(randId)
+func (r *RelationFormat[T]) GetByRandId(ctx context.Context, randId string) (interface{}, error) {
+	return r.base.Get(ctx, randId)
 }
 
 func (r *RelationFormat[T]) GetItemAttribute() string {
@@ -104,13 +105,13 @@ func (r *RelationFormat[T]) GetRandIdAttribute() string {
 	return r.randIdAttribute
 }
 
-func (r *RelationFormat[T]) SetItem(item interface{}) error {
+func (r *RelationFormat[T]) SetItem(ctx context.Context, item interface{}) error {
 	typedItem, ok := item.(T)
 	if !ok {
 		return fmt.Errorf("invalid item type: expected %T, got %T", *new(T), item)
 	}
 
-	return r.base.Upsert(typedItem)
+	return r.base.Upsert(ctx, typedItem)
 }
 
 func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {

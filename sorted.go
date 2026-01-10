@@ -93,7 +93,7 @@ func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 			return errGet
 		}
 		if isBlankPage {
-			errDelBlankPage := srtd.DelBlankPage(pipe, ctx, keyParams...)
+			errDelBlankPage := srtd.DelBlankPage(ctx, pipe, keyParams...)
 			if errDelBlankPage != nil {
 				return errDelBlankPage
 			}
@@ -120,34 +120,34 @@ func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...stri
 	if errDel != nil {
 		return errDel
 	}
-	_, errPipe := pipe.Exec(context.Background())
+	_, errPipe := pipe.Exec(ctx)
 	return errPipe
 }
 
-func (srtd *Sorted[T]) Fetch(ctx context.Context, direction string) *SortedFetchBuilder[T] {
-	return &SortedFetchBuilder[T]{
+func (srtd *Sorted[T]) Fetch(ctx context.Context, direction string) *sortedFetchBuilder[T] {
+	return &sortedFetchBuilder[T]{
 		mainCtx:   ctx,
 		direction: direction,
 	}
 }
 
-func (srtd *Sorted[T]) SetBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, keyParams ...string) {
+func (srtd *Sorted[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
 	pipe.Set(
-		pipeCtx,
+		ctx,
 		lastPageKey,
 		1,
 		srtd.timeToLive,
 	)
 }
 
-func (srtd *Sorted[T]) DelBlankPage(pipe redis.Pipeliner, pipeCtx context.Context, keyParams ...string) error {
+func (srtd *Sorted[T]) DelBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
-	pipe.Del(pipeCtx, lastPageKey)
+	pipe.Del(ctx, lastPageKey)
 	return nil
 }
 
@@ -186,42 +186,25 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 	}
 }
 
-func (srtd *Sorted[T]) Remove(ctx context.Context, keyParams ...string) error {
-	pipe := srtd.client.Pipeline()
-	err := srtd.sortedSetClient.Delete(ctx, pipe, keyParams...)
-	if err != nil {
-		return err
+func (srtd *Sorted[T]) Remove(ctx context.Context) *sortedRemoveBuilder[T] {
+	return &sortedRemoveBuilder[T]{
+		srtd:      srtd,
+		mainCtx:   ctx,
+		keyParams: nil,
+		purge:     false,
 	}
-	_, errPipe := pipe.Exec(context.Background())
-	return errPipe
 }
 
-func (srtd *Sorted[T]) Purge(ctx context.Context, params ...string) error {
-	pipeCtx := context.Background()
-	pipe := srtd.client.Pipeline()
-
-	fetchedItems, err := srtd.Fetch(ctx, Ascending).WithParams(params...).Exec()
-	if err != nil {
-		return err
+func (srtd *Sorted[T]) Purge(ctx context.Context) *sortedRemoveBuilder[T] {
+	return &sortedRemoveBuilder[T]{
+		srtd:      srtd,
+		mainCtx:   ctx,
+		keyParams: nil,
+		purge:     true,
 	}
-
-	for _, fetchedItem := range fetchedItems {
-		errDelItem := srtd.baseClient.Del(ctx, pipe, fetchedItem)
-		if errDelItem != nil {
-			return errDelItem
-		}
-	}
-
-	err = srtd.sortedSetClient.Delete(ctx, pipe, params...)
-	if err != nil {
-		return err
-	}
-
-	_, errPipe := pipe.Exec(pipeCtx)
-	return errPipe
 }
 
-type SortedFetchBuilder[T item.Blueprint] struct {
+type sortedFetchBuilder[T item.Blueprint] struct {
 	mainCtx       context.Context
 	direction     string
 	sorted        *Sorted[T]
@@ -233,25 +216,25 @@ type SortedFetchBuilder[T item.Blueprint] struct {
 	upperbound    int64
 }
 
-func (s *SortedFetchBuilder[T]) WithParams(params ...string) *SortedFetchBuilder[T] {
+func (s *sortedFetchBuilder[T]) WithParams(params ...string) *sortedFetchBuilder[T] {
 	s.keyParams = params
 	return s
 }
 
-func (s *SortedFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), processorArgs ...interface{}) *SortedFetchBuilder[T] {
+func (s *sortedFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), processorArgs ...interface{}) *sortedFetchBuilder[T] {
 	s.processor = processor
 	s.processorArgs = processorArgs
 	return s
 }
 
-func (s *SortedFetchBuilder[T]) ByScore(lowerbound int64, upperbound int64) *SortedFetchBuilder[T] {
+func (s *sortedFetchBuilder[T]) WithRange(lowerbound int64, upperbound int64) *sortedFetchBuilder[T] {
 	s.byScore = true
 	s.lowerbound = lowerbound
 	s.upperbound = upperbound
 	return s
 }
 
-func (s *SortedFetchBuilder[T]) Exec() ([]T, error) {
+func (s *sortedFetchBuilder[T]) Exec() ([]T, error) {
 	if s.byScore {
 		return s.sorted.sortedSetClient.Fetch(
 			s.mainCtx,
@@ -272,4 +255,42 @@ func (s *SortedFetchBuilder[T]) Exec() ([]T, error) {
 			s.lowerbound,
 			s.upperbound, true, s.keyParams...)
 	}
+}
+
+type sortedRemoveBuilder[T item.Blueprint] struct {
+	srtd      *Sorted[T]
+	mainCtx   context.Context
+	keyParams []string
+	purge     bool
+}
+
+func (s *sortedRemoveBuilder[T]) WithParams(params ...string) *sortedRemoveBuilder[T] {
+	s.keyParams = params
+	return s
+}
+
+func (s *sortedRemoveBuilder[T]) Exec() error {
+	pipe := s.srtd.client.Pipeline()
+
+	if s.purge {
+		fetchedItems, err := s.srtd.Fetch(s.mainCtx, Ascending).WithParams(s.keyParams...).Exec()
+		if err != nil {
+			return err
+		}
+
+		for _, fetchedItem := range fetchedItems {
+			errDelItem := s.srtd.baseClient.Del(s.mainCtx, pipe, fetchedItem)
+			if errDelItem != nil {
+				return errDelItem
+			}
+		}
+	}
+
+	err := s.srtd.sortedSetClient.Delete(s.mainCtx, pipe, s.keyParams...)
+	if err != nil {
+		return err
+	}
+
+	_, errPipe := pipe.Exec(s.mainCtx)
+	return errPipe
 }
