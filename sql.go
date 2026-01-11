@@ -37,7 +37,7 @@ func (s *TimelineSeeder[T]) SetSortingReference(scoringField string) {
 	s.scoringField = scoringField
 }
 
-func (s *TimelineSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) (T, error) {
+func (s *TimelineSeeder[T]) findOne(ctx context.Context, rowQuery string, rowScanner RowScanner[T], randid string) (T, error) {
 	var item T
 	if s.db == nil {
 		return item, NoDatabaseProvided
@@ -47,7 +47,7 @@ func (s *TimelineSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], q
 		return item, QueryOrScannerNotConfigured
 	}
 
-	row := s.db.QueryRowContext(context.TODO(), rowQuery, queryArgs...)
+	row := s.db.QueryRowContext(ctx, rowQuery, randid)
 
 	item, err := rowScanner(row)
 	if err != nil {
@@ -60,32 +60,6 @@ func (s *TimelineSeeder[T]) FindOne(rowQuery string, rowScanner RowScanner[T], q
 	return item, nil
 }
 
-func (s *TimelineSeeder[T]) SeedOne(rowQuery string, rowScanner RowScanner[T], queryArgs []interface{}) error {
-	item, err := s.FindOne(rowQuery, rowScanner, queryArgs)
-	if err != nil {
-		return err
-	}
-
-	pipeCtx := context.Background()
-	pipe := s.redis.Pipeline()
-	s.baseClient.Set(pipe, pipeCtx, item)
-	_, err = pipe.Exec(pipeCtx)
-
-	return err
-}
-
-func (s *TimelineSeeder[T]) SeedPartial(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], rowsScanner RowsScanner[T]) error {
-	return s.PartialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows)
-	})
-}
-
-func (s *TimelineSeeder[T]) SeedPartialWithRelation(rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], rowsScannerWithJoin RowsScannerWithRelation[T]) error {
-	return s.PartialSeed(rowQuery, firstPageQuery, nextPageQuery, queryArgs, subtraction, lastRandId, paginateParams, rowScanner, func(rows *sql.Rows) (T, error) {
-		return rowsScannerWithJoin(rows, s.paginationClient.relation)
-	})
-}
-
 func (s *TimelineSeeder[T]) Seed(ctx context.Context, subtraction int64, lastRandId string, queryBuilder Builder) *timelineSeedBuilder[T] {
 	return &timelineSeedBuilder[T]{
 		mainCtx:        ctx,
@@ -96,7 +70,17 @@ func (s *TimelineSeeder[T]) Seed(ctx context.Context, subtraction int64, lastRan
 	}
 }
 
-func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, firstPageQuery string, nextPageQuery string, queryArgs []interface{}, subtraction int64, lastRandId string, paginateParams []string, rowScanner RowScanner[T], scanFunc func(*sql.Rows) (T, error)) error {
+func (s *TimelineSeeder[T]) runSeed(
+	ctx context.Context,
+	rowQuery string,
+	firstPageQuery string,
+	nextPageQuery string,
+	queryArgs []interface{},
+	subtraction int64,
+	lastRandId string,
+	rowScanner RowScanner[T],
+	scanFunc func(*sql.Rows) (T, error),
+	keyParams ...string) error {
 	var firstPage bool
 	var queryToUse string
 
@@ -108,7 +92,7 @@ func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, fi
 		firstPage = true
 		queryToUse = firstPageQuery
 	} else {
-		reference, errFindReference := s.FindOne(rowQuery, rowScanner, []interface{}{lastRandId})
+		reference, errFindReference := s.findOne(ctx, rowQuery, rowScanner, lastRandId)
 		if errFindReference != nil {
 			if errors.Is(errFindReference, sql.ErrNoRows) {
 				return DocumentOrReferencesNotFound
@@ -133,7 +117,7 @@ func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, fi
 	}
 	queryToUse = queryToUse + ` LIMIT ` + strconv.FormatInt(limit, 10)
 
-	rows, err := s.db.QueryContext(context.TODO(), queryToUse, queryArgs...)
+	rows, err := s.db.QueryContext(ctx, queryToUse, queryArgs...)
 	if err != nil {
 		return err
 	}
@@ -142,7 +126,6 @@ func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, fi
 	var counterLoop int64 = 0
 
 	// pipeline preparation
-	pipeCtx := context.Background()
 	pipeline := s.redis.Pipeline()
 
 	for rows.Next() {
@@ -151,8 +134,8 @@ func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, fi
 			return err
 		}
 
-		s.baseClient.Set(pipeline, pipeCtx, item)
-		s.paginationClient.IngestItem(pipeline, pipeCtx, item, paginateParams, true)
+		s.baseClient.Set(ctx, pipeline, item)
+		s.paginationClient.IngestItem(ctx, pipeline, item, true, keyParams...)
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -160,15 +143,15 @@ func (s *TimelineSeeder[T]) PartialSeed(ctx context.Context, rowQuery string, fi
 	}
 
 	if firstPage && counterLoop == 0 {
-		s.paginationClient.SetBlankPage(pipeline, pipeCtx, paginateParams)
+		s.paginationClient.SetBlankPage(ctx, pipeline, keyParams...)
 	} else if firstPage && counterLoop > 0 && counterLoop < s.paginationClient.GetItemPerPage() {
-		s.paginationClient.SetFirstPage(pipeline, pipeCtx, paginateParams)
+		s.paginationClient.SetFirstPage(ctx, pipeline, keyParams...)
 	} else if !firstPage && subtraction+counterLoop < s.paginationClient.GetItemPerPage() {
-		s.paginationClient.SetLastPage(pipeline, pipeCtx, paginateParams)
+		s.paginationClient.SetLastPage(ctx, pipeline, keyParams...)
 	}
 
 	if firstPage {
-		s.paginationClient.SetExpiration(pipeline, pipeCtx, paginateParams)
+		s.paginationClient.SetExpiration(ctx, pipeline, keyParams...)
 	}
 
 	// pipeline execution
@@ -210,19 +193,25 @@ func (t *timelineSeedBuilder[T]) WithRelation(relations map[string]Relation) *ti
 }
 
 func (t *timelineSeedBuilder[T]) Exec() error {
-	return t.timelineSeeder.PartialSeed(
+	scanFunc := func(rows *sql.Rows) (T, error) {
+		if t.relation != nil {
+			return t.rowsScanner(rows)
+		} else {
+			return t.rowsScannerWithJoin(rows, t.relation)
+		}
+	}
+
+	return t.timelineSeeder.runSeed(
+		t.mainCtx,
 		t.queryBuilder.Row("randid"),
 		t.queryBuilder.Base(),
 		t.queryBuilder.WithCursor(),
 		t.queryArgs,
 		t.subtraction,
-		t.lastRandId, t.keyParams, t.rowScanner, func(rows *sql.Rows) (T, error) {
-			if t.relation != nil {
-				return t.rowsScanner(rows)
-			} else {
-				return t.rowsScannerWithJoin(rows, t.relation)
-			}
-		})
+		t.lastRandId,
+		t.rowScanner,
+		scanFunc,
+		t.keyParams...)
 }
 
 type SortedSeeder[T SQLItemBlueprint] struct {
@@ -259,6 +248,7 @@ func (s *SortedSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScanner
 }
 
 func (s *SortedSeeder[T]) runSeed(
+	ctx context.Context,
 	query string,
 	args []interface{},
 	keyParam []string,
@@ -281,7 +271,6 @@ func (s *SortedSeeder[T]) runSeed(
 	var counterLoop int64
 
 	// pipeline preparation
-	pipeCtx := context.Background()
 	pipeline := s.redis.Pipeline()
 
 	for rows.Next() {
@@ -290,8 +279,8 @@ func (s *SortedSeeder[T]) runSeed(
 			return errScan
 		}
 
-		s.baseClient.Set(pipeline, pipeCtx, item)
-		s.sortedClient.IngestItem(pipeline, pipeCtx, item, keyParam, true)
+		s.baseClient.Set(ctx, pipeline, item)
+		s.sortedClient.IngestItem(ctx, pipeline, item, keyParam, true)
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -299,13 +288,50 @@ func (s *SortedSeeder[T]) runSeed(
 	}
 
 	if counterLoop == 0 {
-		s.sortedClient.SetBlankPage(pipeline, pipeCtx, keyParam)
+		s.sortedClient.SetBlankPage(ctx, pipeline, keyParam)
 	} else {
-		s.sortedClient.SetExpiration(pipeline, pipeCtx, keyParam)
+		s.sortedClient.SetExpiration(ctx, pipeline, keyParam)
 	}
 
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe
+}
+
+type sortedSeedBuilder[T SQLItemBlueprint] struct {
+	mainCtx             context.Context
+	sortedSeeder        *SortedSeeder[T]
+	queryBuilder        *Builder
+	queryArgs           []interface{}
+	relation            map[string]Relation
+	rowsScanner         RowsScanner[T]
+	rowsScannerWithJoin RowsScannerWithRelation[T]
+	keyParams           []string
+}
+
+func (t *sortedSeedBuilder[T]) WithQueryArgs(queryArgs ...interface{}) *sortedSeedBuilder[T] {
+	t.queryArgs = queryArgs
+	return t
+}
+
+func (t *sortedSeedBuilder[T]) WithParams(keyParams ...string) *sortedSeedBuilder[T] {
+	t.keyParams = keyParams
+	return t
+}
+
+func (t *sortedSeedBuilder[T]) WithRelation(relations map[string]Relation) *sortedSeedBuilder[T] {
+	t.relation = relations
+	return t
+}
+
+func (t *sortedSeedBuilder[T]) Exec() error {
+	scanFunc := func(rows *sql.Rows) (T, error) {
+		if t.relation != nil {
+			return t.rowsScanner(rows)
+		} else {
+			return t.rowsScannerWithJoin(rows, t.relation)
+		}
+	}
+
 }
 
 type PageSeeder[T SQLItemBlueprint] struct {
