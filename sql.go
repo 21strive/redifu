@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 	"strconv"
 	"time"
@@ -60,7 +59,12 @@ func (s *TimelineSeeder[T]) findOne(ctx context.Context, rowQuery string, rowSca
 	return item, nil
 }
 
-func (s *TimelineSeeder[T]) Seed(ctx context.Context, subtraction int64, lastRandId string, queryBuilder Builder) *timelineSeedBuilder[T] {
+func (s *TimelineSeeder[T]) Seed(
+	ctx context.Context,
+	subtraction int64,
+	lastRandId string,
+	queryBuilder Builder,
+) *timelineSeedBuilder[T] {
 	return &timelineSeedBuilder[T]{
 		mainCtx:        ctx,
 		timelineSeeder: s,
@@ -164,17 +168,13 @@ func (s *TimelineSeeder[T]) runSeed(
 }
 
 type timelineSeedBuilder[T SQLItemBlueprint] struct {
-	mainCtx             context.Context
-	timelineSeeder      *TimelineSeeder[T]
-	queryBuilder        *Builder
-	subtraction         int64
-	lastRandId          string
-	queryArgs           []interface{}
-	relation            map[string]Relation
-	rowScanner          RowScanner[T]
-	rowsScanner         RowsScanner[T]
-	rowsScannerWithJoin RowsScannerWithRelation[T]
-	keyParams           []string
+	mainCtx        context.Context
+	timelineSeeder *TimelineSeeder[T]
+	queryBuilder   *Builder
+	subtraction    int64
+	lastRandId     string
+	queryArgs      []interface{}
+	keyParams      []string
 }
 
 func (t *timelineSeedBuilder[T]) WithQueryArgs(queryArgs ...interface{}) *timelineSeedBuilder[T] {
@@ -187,18 +187,9 @@ func (t *timelineSeedBuilder[T]) WithParams(keyParams ...string) *timelineSeedBu
 	return t
 }
 
-func (t *timelineSeedBuilder[T]) WithRelation(relations map[string]Relation) *timelineSeedBuilder[T] {
-	t.relation = relations
-	return t
-}
-
-func (t *timelineSeedBuilder[T]) Exec() error {
+func (t *timelineSeedBuilder[T]) Exec(rowScanner RowScanner[T], rowsScanner RowsScanner[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		if t.relation != nil {
-			return t.rowsScanner(rows)
-		} else {
-			return t.rowsScannerWithJoin(rows, t.relation)
-		}
+		return rowsScanner(rows)
 	}
 
 	return t.timelineSeeder.runSeed(
@@ -209,7 +200,29 @@ func (t *timelineSeedBuilder[T]) Exec() error {
 		t.queryArgs,
 		t.subtraction,
 		t.lastRandId,
-		t.rowScanner,
+		rowScanner,
+		scanFunc,
+		t.keyParams...)
+}
+
+func (t *timelineSeedBuilder[T]) ExecWithRelation(
+	rowScanner RowScanner[T],
+	rowsScanner RowsScannerWithRelation[T],
+	relation map[string]Relation,
+) error {
+	scanFunc := func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows, relation)
+	}
+
+	return t.timelineSeeder.runSeed(
+		t.mainCtx,
+		t.queryBuilder.Row("randid"),
+		t.queryBuilder.Base(),
+		t.queryBuilder.WithCursor(),
+		t.queryArgs,
+		t.subtraction,
+		t.lastRandId,
+		rowScanner,
 		scanFunc,
 		t.keyParams...)
 }
@@ -235,16 +248,12 @@ func NewSortedSeeder[T SQLItemBlueprint](
 	}
 }
 
-func (s *SortedSeeder[T]) Seed(query string, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
-	return s.runSeed(query, args, keyParam, func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows)
-	})
-}
-
-func (s *SortedSeeder[T]) SeedWithRelation(query string, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
-	return s.runSeed(query, args, keyParam, func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows, s.sortedClient.relation)
-	})
+func (s *SortedSeeder[T]) Seed(ctx context.Context, queryBuilder *Builder) *sortedSeedBuilder[T] {
+	return &sortedSeedBuilder[T]{
+		mainCtx:      ctx,
+		sortedSeeder: s,
+		queryBuilder: queryBuilder,
+	}
 }
 
 func (s *SortedSeeder[T]) runSeed(
@@ -280,7 +289,7 @@ func (s *SortedSeeder[T]) runSeed(
 		}
 
 		s.baseClient.Set(ctx, pipeline, item)
-		s.sortedClient.IngestItem(ctx, pipeline, item, keyParam, true)
+		s.sortedClient.IngestItem(ctx, pipeline, item, true, keyParam...)
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -288,24 +297,21 @@ func (s *SortedSeeder[T]) runSeed(
 	}
 
 	if counterLoop == 0 {
-		s.sortedClient.SetBlankPage(ctx, pipeline, keyParam)
+		s.sortedClient.SetBlankPage(ctx, pipeline, keyParam...)
 	} else {
-		s.sortedClient.SetExpiration(ctx, pipeline, keyParam)
+		s.sortedClient.SetExpiration(ctx, pipeline, keyParam...)
 	}
 
-	_, errPipe := pipeline.Exec(pipeCtx)
+	_, errPipe := pipeline.Exec(ctx)
 	return errPipe
 }
 
 type sortedSeedBuilder[T SQLItemBlueprint] struct {
-	mainCtx             context.Context
-	sortedSeeder        *SortedSeeder[T]
-	queryBuilder        *Builder
-	queryArgs           []interface{}
-	relation            map[string]Relation
-	rowsScanner         RowsScanner[T]
-	rowsScannerWithJoin RowsScannerWithRelation[T]
-	keyParams           []string
+	mainCtx      context.Context
+	sortedSeeder *SortedSeeder[T]
+	queryBuilder *Builder
+	queryArgs    []interface{}
+	keyParams    []string
 }
 
 func (t *sortedSeedBuilder[T]) WithQueryArgs(queryArgs ...interface{}) *sortedSeedBuilder[T] {
@@ -318,20 +324,32 @@ func (t *sortedSeedBuilder[T]) WithParams(keyParams ...string) *sortedSeedBuilde
 	return t
 }
 
-func (t *sortedSeedBuilder[T]) WithRelation(relations map[string]Relation) *sortedSeedBuilder[T] {
-	t.relation = relations
-	return t
-}
-
-func (t *sortedSeedBuilder[T]) Exec() error {
+func (t *sortedSeedBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		if t.relation != nil {
-			return t.rowsScanner(rows)
-		} else {
-			return t.rowsScannerWithJoin(rows, t.relation)
-		}
+		return rowsScanner(rows)
 	}
 
+	return t.sortedSeeder.runSeed(
+		t.mainCtx,
+		t.queryBuilder.Base(),
+		t.queryArgs,
+		t.keyParams,
+		scanFunc,
+	)
+}
+
+func (t *sortedSeedBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T], relation map[string]Relation) error {
+	scanFunc := func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows, relation)
+	}
+
+	return t.sortedSeeder.runSeed(
+		t.mainCtx,
+		t.queryBuilder.Base(),
+		t.queryArgs,
+		t.keyParams,
+		scanFunc,
+	)
 }
 
 type PageSeeder[T SQLItemBlueprint] struct {
