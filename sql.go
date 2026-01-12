@@ -507,12 +507,18 @@ func NewTimeSeriesSeeder[T SQLItemBlueprint](
 	}
 }
 
-// let user append both lowerbound and upperbound as argument.
 func (s *TimeSeriesSeeder[T]) Seed(
 	ctx context.Context,
+	query Builder,
 	lowerbound time.Time,
-	upperbound time.Time) {
-
+	upperbound time.Time) *timeSeriesBuilder[T] {
+	return &timeSeriesBuilder[T]{
+		mainCtx:          ctx,
+		timeSeriesSeeder: s,
+		query:            query.Base(),
+		lowerBound:       lowerbound,
+		upperBound:       upperbound,
+	}
 }
 
 func (s *TimeSeriesSeeder[T]) runSeed(
