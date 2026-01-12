@@ -252,7 +252,7 @@ func (s *SortedSeeder[T]) Seed(ctx context.Context, queryBuilder *Builder) *sort
 	return &sortedSeedBuilder[T]{
 		mainCtx:      ctx,
 		sortedSeeder: s,
-		queryBuilder: queryBuilder,
+		query:        queryBuilder.Base(),
 	}
 }
 
@@ -260,8 +260,8 @@ func (s *SortedSeeder[T]) runSeed(
 	ctx context.Context,
 	query string,
 	args []interface{},
-	keyParam []string,
 	scanFunc func(*sql.Rows) (T, error),
+	keyParams ...string,
 ) error {
 	if s.db == nil {
 		return NoDatabaseProvided
@@ -289,7 +289,7 @@ func (s *SortedSeeder[T]) runSeed(
 		}
 
 		s.baseClient.Set(ctx, pipeline, item)
-		s.sortedClient.IngestItem(ctx, pipeline, item, true, keyParam...)
+		s.sortedClient.IngestItem(ctx, pipeline, item, true, keyParams...)
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -297,9 +297,9 @@ func (s *SortedSeeder[T]) runSeed(
 	}
 
 	if counterLoop == 0 {
-		s.sortedClient.SetBlankPage(ctx, pipeline, keyParam...)
+		s.sortedClient.SetBlankPage(ctx, pipeline, keyParams...)
 	} else {
-		s.sortedClient.SetExpiration(ctx, pipeline, keyParam...)
+		s.sortedClient.SetExpiration(ctx, pipeline, keyParams...)
 	}
 
 	_, errPipe := pipeline.Exec(ctx)
@@ -309,7 +309,7 @@ func (s *SortedSeeder[T]) runSeed(
 type sortedSeedBuilder[T SQLItemBlueprint] struct {
 	mainCtx      context.Context
 	sortedSeeder *SortedSeeder[T]
-	queryBuilder *Builder
+	query        string
 	queryArgs    []interface{}
 	keyParams    []string
 }
@@ -331,10 +331,10 @@ func (t *sortedSeedBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 
 	return t.sortedSeeder.runSeed(
 		t.mainCtx,
-		t.queryBuilder.Base(),
+		t.query,
 		t.queryArgs,
-		t.keyParams,
 		scanFunc,
+		t.keyParams...,
 	)
 }
 
@@ -345,10 +345,10 @@ func (t *sortedSeedBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelat
 
 	return t.sortedSeeder.runSeed(
 		t.mainCtx,
-		t.queryBuilder.Base(),
+		t.query,
 		t.queryArgs,
-		t.keyParams,
 		scanFunc,
+		t.keyParams...,
 	)
 }
 
@@ -373,26 +373,25 @@ func NewPageSeeder[T SQLItemBlueprint](
 	}
 }
 
-func (p *PageSeeder[T]) Seed(query string, page int64, rowsScanner RowsScanner[T], args []interface{}, keyParam []string) error {
+func (p *PageSeeder[T]) Seed(ctx context.Context, query *Builder, page int64) *pageSeederBuilder[T] {
 	offset := (page - 1) * p.pageClient.itemPerPage
-	adjustedQuery := query + " LIMIT " + strconv.FormatInt(p.pageClient.itemPerPage, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
-	return p.runSeed(adjustedQuery, args, page, keyParam, func(rows *sql.Rows) (T, error) { return rowsScanner(rows) })
-}
+	adjustedQuery := query.Base() + " LIMIT " + strconv.FormatInt(p.pageClient.itemPerPage, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
 
-func (p *PageSeeder[T]) SeedWithRelation(query string, page int64, rowsScanner RowsScannerWithRelation[T], args []interface{}, keyParam []string) error {
-	offset := (page - 1) * p.pageClient.itemPerPage
-	adjustedQuery := query + " LIMIT " + strconv.FormatInt(p.pageClient.itemPerPage, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
-	return p.runSeed(adjustedQuery, args, page, keyParam, func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows, p.pageClient.relation)
-	})
+	return &pageSeederBuilder[T]{
+		mainCtx:       ctx,
+		pageSeeder:    p,
+		page:          page,
+		adjustedQuery: adjustedQuery,
+	}
 }
 
 func (p *PageSeeder[T]) runSeed(
+	ctx context.Context,
 	query string,
 	args []interface{},
 	page int64,
-	keyParam []string,
 	scanFunc func(*sql.Rows) (T, error),
+	keyParams ...string,
 ) error {
 	if p.db == nil {
 		return NoDatabaseProvided
@@ -420,8 +419,8 @@ func (p *PageSeeder[T]) runSeed(
 			return errScan
 		}
 
-		p.baseClient.Set(pipeline, pipeCtx, item)
-		p.pageClient.IngestItem(pipeline, pipeCtx, item, page, keyParam)
+		p.baseClient.Set(ctx, pipeline, item)
+		p.pageClient.IngestItem(ctx, pipeline, item, page, keyParams...)
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -429,15 +428,62 @@ func (p *PageSeeder[T]) runSeed(
 	}
 
 	if counterLoop == 0 {
-		p.pageClient.SetBlankPage(pipeline, pipeCtx, page, keyParam)
+		p.pageClient.SetBlankPage(ctx, pipeline, page, keyParams...)
 	} else {
-		p.pageClient.SetExpiration(pipeline, pipeCtx, page, keyParam)
+		p.pageClient.SetExpiration(ctx, pipeline, page, keyParams...)
 	}
 
-	p.pageClient.AddPage(pipeline, pipeCtx, page, keyParam)
+	p.pageClient.AddPage(ctx, pipeline, page, keyParams...)
 
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe
+}
+
+type pageSeederBuilder[T SQLItemBlueprint] struct {
+	mainCtx       context.Context
+	pageSeeder    *PageSeeder[T]
+	page          int64
+	adjustedQuery string
+	queryArgs     []interface{}
+	keyParams     []string
+}
+
+func (t *pageSeederBuilder[T]) WithQueryArgs(queryArgs ...interface{}) *pageSeederBuilder[T] {
+	t.queryArgs = queryArgs
+	return t
+}
+
+func (t *pageSeederBuilder[T]) WithParams(keyParams ...string) *pageSeederBuilder[T] {
+	t.keyParams = keyParams
+	return t
+}
+
+func (t *pageSeederBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
+	scanFunc := func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows)
+	}
+
+	return t.pageSeeder.runSeed(
+		t.mainCtx,
+		t.adjustedQuery,
+		t.queryArgs,
+		t.page,
+		scanFunc,
+		t.keyParams...)
+}
+
+func (t *pageSeederBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T], relation map[string]Relation) error {
+	scanFunc := func(rows *sql.Rows) (T, error) {
+		return rowsScanner(rows, relation)
+	}
+
+	return t.pageSeeder.runSeed(
+		t.mainCtx,
+		t.adjustedQuery,
+		t.queryArgs,
+		t.page,
+		scanFunc,
+		t.keyParams...)
 }
 
 type TimeSeriesSeeder[T SQLItemBlueprint] struct {
@@ -462,25 +508,21 @@ func NewTimeSeriesSeeder[T SQLItemBlueprint](
 }
 
 // let user append both lowerbound and upperbound as argument.
-func (s *TimeSeriesSeeder[T]) Seed(query string, queryArgs []interface{}, lowerbound time.Time, upperbound time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
-	gaps, errFindGaps := s.timeSeriesClient.FindGap(lowerbound, upperbound, keyParam)
-	if errFindGaps != nil {
-		return errFindGaps
-	}
+func (s *TimeSeriesSeeder[T]) Seed(
+	ctx context.Context,
+	lowerbound time.Time,
+	upperbound time.Time) {
 
-	if gaps != nil {
-		for _, gap := range gaps {
-			lowerGap := time.UnixMilli(gap[0]).UTC()
-			upperGap := time.UnixMilli(gap[1]).UTC()
-
-			return s.runSeed(query, queryArgs, lowerGap, upperGap, keyParam, rowsScanner)
-		}
-	}
-
-	return s.runSeed(query, queryArgs, lowerbound, upperbound, keyParam, rowsScanner)
 }
 
-func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, lowerGap time.Time, upperGap time.Time, keyParam []string, rowsScanner RowsScanner[T]) error {
+func (s *TimeSeriesSeeder[T]) runSeed(
+	ctx context.Context,
+	query string,
+	queryArgs []interface{},
+	lowerGap time.Time,
+	upperGap time.Time,
+	rowsScanner RowsScanner[T],
+	keyParams ...string) error {
 	queryArgs = append(queryArgs, lowerGap, upperGap)
 
 	rows, err := s.db.QueryContext(context.TODO(), query, queryArgs...)
@@ -492,7 +534,7 @@ func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, low
 	pipeCtx := context.Background()
 	pipeline := s.redis.Pipeline()
 
-	isSortedExists := s.timeSeriesClient.Count(keyParam) > 0
+	isSortedExists := s.timeSeriesClient.Count(ctx, keyParams...) > 0
 	var counterLoop int64
 	for rows.Next() {
 		item, errScan := rowsScanner(rows)
@@ -500,8 +542,8 @@ func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, low
 			return errScan
 		}
 
-		s.baseClient.Set(pipeline, pipeCtx, item)
-		err := s.timeSeriesClient.IngestItem(pipeline, pipeCtx, item, keyParam)
+		s.baseClient.Set(ctx, pipeline, item)
+		err := s.timeSeriesClient.IngestItem(ctx, pipeline, item, keyParams...)
 		if err != nil {
 			return err
 		}
@@ -510,10 +552,50 @@ func (s *TimeSeriesSeeder[T]) runSeed(query string, queryArgs []interface{}, low
 
 	// only set expiration in the first seed attempt
 	if counterLoop > 0 && !isSortedExists {
-		s.timeSeriesClient.SetExpiration(pipeline, pipeCtx, keyParam)
+		s.timeSeriesClient.SetExpiration(ctx, pipeline, keyParams...)
 	}
 
-	s.timeSeriesClient.AddPage(pipeline, pipeCtx, lowerGap, upperGap, keyParam)
+	s.timeSeriesClient.AddPage(ctx, pipeline, lowerGap, upperGap, keyParams...)
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe
+}
+
+type timeSeriesBuilder[T SQLItemBlueprint] struct {
+	mainCtx          context.Context
+	timeSeriesSeeder *TimeSeriesSeeder[T]
+	query            string
+	queryArgs        []interface{}
+	keyParams        []string
+	lowerBound       time.Time
+	upperBound       time.Time
+}
+
+func (t *timeSeriesBuilder[T]) WithQueryArgs(queryArgs ...interface{}) *timeSeriesBuilder[T] {
+	t.queryArgs = queryArgs
+	return t
+}
+
+func (t *timeSeriesBuilder[T]) WithParams(keyParams ...string) *timeSeriesBuilder[T] {
+	t.keyParams = keyParams
+	return t
+}
+
+func (t *timeSeriesBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
+	gaps, errFindGaps := t.timeSeriesSeeder.timeSeriesClient.FindGap(
+		t.mainCtx,
+		t.lowerBound, t.upperBound, t.keyParams...)
+	if errFindGaps != nil {
+		return errFindGaps
+	}
+
+	if gaps != nil {
+		for _, gap := range gaps {
+			lowerGap := time.UnixMilli(gap[0]).UTC()
+			upperGap := time.UnixMilli(gap[1]).UTC()
+
+			return t.timeSeriesSeeder.runSeed(t.mainCtx, t.query, t.queryArgs, lowerGap, upperGap, rowsScanner, t.keyParams...)
+		}
+	}
+
+	return t.timeSeriesSeeder.runSeed(t.mainCtx, t.query, t.queryArgs, t.lowerBound, t.upperBound, rowsScanner, t.keyParams...)
 }

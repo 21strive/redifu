@@ -34,15 +34,15 @@ func NewTimeSeries[T item.Blueprint](
 	}
 }
 
-func (s *TimeSeries[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
-	s.sorted.SetExpiration(ctx, pipe, keyParam...)
+func (s *TimeSeries[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+	s.sorted.SetExpiration(ctx, pipe, keyParams...)
 }
 
 func (s *TimeSeries[T]) Count(ctx context.Context, keyParams ...string) int64 {
 	return s.sorted.Count(ctx, keyParams...)
 }
 
-func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParam ...string) error {
+func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
 	itemScore, errGetScore := getItemScore(item, s.sorted.sortingReference)
 	if errGetScore != nil {
 		return errGetScore
@@ -50,12 +50,12 @@ func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParam ...string)
 
 	// Convert item score to time for TimeSeries operations
 	itemTime := time.UnixMilli(int64(itemScore)).UTC()
-	segment, errScan := s.Scan(ctx, itemTime, itemTime, keyParam)
+	segment, errScan := s.Scan(ctx, itemTime, itemTime, keyParams...)
 	if errScan != nil {
 		return errScan
 	}
 	if segment != nil && len(*segment) == 1 {
-		errAdd := s.sorted.AddItem(ctx, item, keyParam...)
+		errAdd := s.sorted.AddItem(ctx, item, keyParams...)
 		if errAdd != nil {
 			return errAdd
 		}
@@ -139,7 +139,7 @@ func (s *TimeSeries[T]) validateNoOverlap(ctx context.Context, lowerbound time.T
 // Scan retrieves all segments that intersect with the specified range
 // For inclusive intervals [a,b] and [c,d], they intersect if: upper > lowerbound AND lower < upperbound
 // Returns segments sorted by lower bound
-func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParam []string) (*[][]int64, error) {
+func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParams ...string) (*[][]int64, error) {
 	if !lowerbound.Before(upperbound) {
 		return nil, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
 	}
@@ -148,7 +148,7 @@ func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbou
 	lowerboundUnix := lowerbound.UnixMilli()
 	upperboundUnix := upperbound.UnixMilli()
 
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParams)
 
 	result, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()
 	if err != nil {
@@ -181,12 +181,12 @@ func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbou
 
 // FindGap identifies gaps between seeded segments within the specified range
 // Since segments are guaranteed non-overlapping (enforced by AddPage), no merging is needed
-func (s *TimeSeries[T]) FindGap(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParam []string) ([][]int64, error) {
+func (s *TimeSeries[T]) FindGap(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParams ...string) ([][]int64, error) {
 	if !lowerbound.Before(upperbound) {
 		return [][]int64{}, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
 	}
 
-	segments, err := s.Scan(ctx, lowerbound, upperbound, keyParam)
+	segments, err := s.Scan(ctx, lowerbound, upperbound, keyParams...)
 	if err != nil {
 		return nil, err
 	}
@@ -244,14 +244,14 @@ func (s *TimeSeries[T]) Fetch(ctx context.Context, lowerbound time.Time, upperbo
 }
 
 // Remove deletes a segment from the segment store by its lowerbound
-func (s *TimeSeries[T]) Remove(ctx context.Context, lowerbound time.Time, segmentStoreKeyParam []string) error {
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, segmentStoreKeyParam)
+func (s *TimeSeries[T]) Remove(ctx context.Context, lowerbound time.Time, segmentStoreKeyParams ...string) error {
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, segmentStoreKeyParams)
 	return s.redis.HDel(ctx, segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Err()
 }
 
 // GetAllSegments retrieves all stored segments, sorted by lower bound
-func (s *TimeSeries[T]) GetAllSegments(ctx context.Context, keyParam []string) ([][]int64, error) {
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
+func (s *TimeSeries[T]) GetAllSegments(ctx context.Context, keyParams ...string) ([][]int64, error) {
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParams)
 
 	result, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()
 	if err != nil {
@@ -279,14 +279,14 @@ func (s *TimeSeries[T]) GetAllSegments(ctx context.Context, keyParam []string) (
 }
 
 // Exists checks if a segment with the given lowerbound exists
-func (s *TimeSeries[T]) Exists(ctx context.Context, lowerbound time.Time, keyParam []string) (bool, error) {
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
+func (s *TimeSeries[T]) Exists(ctx context.Context, lowerbound time.Time, keyParams ...string) (bool, error) {
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParams)
 	return s.redis.HExists(ctx, segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Result()
 }
 
 // Count returns the total number of segments stored
-func (s *TimeSeries[T]) CountSegments(ctx context.Context, keyParam []string) (int64, error) {
-	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParam)
+func (s *TimeSeries[T]) CountSegments(ctx context.Context, keyParams ...string) (int64, error) {
+	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParams)
 	return s.redis.HLen(ctx, segmentStoreKey).Result()
 }
 
@@ -316,7 +316,7 @@ func (f *fetchTimeSeriesBuilder[T]) Exec() ([]T, bool, error) {
 		return nil, false, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", f.lowerbound.Format(time.RFC3339), f.upperbound.Format(time.RFC3339))
 	}
 
-	gaps, errFindGaps := f.timeSeries.FindGap(f.mainCtx, f.lowerbound, f.upperbound, f.keyParams)
+	gaps, errFindGaps := f.timeSeries.FindGap(f.mainCtx, f.lowerbound, f.upperbound, f.keyParams...)
 	if errFindGaps != nil {
 		return nil, false, errFindGaps
 	}
