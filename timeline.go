@@ -426,8 +426,6 @@ func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 		}
 	}
 
-	var listRandIds []string
-
 	if b.fetchAll {
 		start = 0
 		stop = -1
@@ -450,7 +448,7 @@ func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 
 	if start == 0 {
 		position = FirstPage
-	} else if int64(len(listRandIds)) < b.timeline.itemPerPage {
+	} else if int64(len(items)) < b.timeline.itemPerPage {
 		position = LastPage
 	} else {
 		position = MiddlePage

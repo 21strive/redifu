@@ -12,7 +12,7 @@ import (
 type RowScanner[T SQLItemBlueprint] func(row *sql.Row) (T, error)
 
 type RowsScanner[T SQLItemBlueprint] func(rows *sql.Rows) (T, error)
-type RowsScannerWithRelation[T SQLItemBlueprint] func(rows *sql.Rows, relation map[string]Relation) (T, error)
+type RowsScannerWithRelation[T SQLItemBlueprint] func(ctx context.Context, rows *sql.Rows, relation map[string]Relation) (T, error)
 
 type TimelineSeeder[T SQLItemBlueprint] struct {
 	db             *sql.DB
@@ -207,7 +207,7 @@ func (t *timelineSeedBuilder[T]) Exec(rowScanner RowScanner[T], rowsScanner Rows
 
 func (t *timelineSeedBuilder[T]) ExecWithRelation(rowScanner RowScanner[T], rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows, t.timelineSeeder.timelineClient.relation)
+		return rowsScanner(t.mainCtx, rows, t.timelineSeeder.timelineClient.relation)
 	}
 
 	return t.timelineSeeder.runSeed(
@@ -336,7 +336,7 @@ func (t *sortedSeedBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 
 func (t *sortedSeedBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows, t.sortedSeeder.sortedClient.relation)
+		return rowsScanner(t.mainCtx, rows, t.sortedSeeder.sortedClient.relation)
 	}
 
 	return t.sortedSeeder.runSeed(
@@ -470,7 +470,7 @@ func (t *pageSeederBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 
 func (t *pageSeederBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows, t.pageSeeder.pageClient.relation)
+		return rowsScanner(t.mainCtx, rows, t.pageSeeder.pageClient.relation)
 	}
 
 	return t.pageSeeder.runSeed(
@@ -616,7 +616,7 @@ func (t *timeSeriesBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 
 func (t *timeSeriesBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(rows, t.timeSeriesSeeder.timeSeriesClient.sorted.relation)
+		return rowsScanner(t.mainCtx, rows, t.timeSeriesSeeder.timeSeriesClient.sorted.relation)
 	}
 
 	t.ValidateRange()
