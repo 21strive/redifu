@@ -246,6 +246,7 @@ func (s *TimeSeries[T]) calculateGaps(segments [][]int64, lowerbound, upperbound
 func (s *TimeSeries[T]) Fetch(ctx context.Context, lowerbound time.Time, upperbound time.Time) *fetchTimeSeriesBuilder[T] {
 	return &fetchTimeSeriesBuilder[T]{
 		mainCtx:    ctx,
+		timeSeries: s,
 		lowerbound: lowerbound,
 		upperbound: upperbound,
 	}

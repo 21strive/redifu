@@ -128,6 +128,7 @@ func (srtd *Sorted[T]) Fetch(ctx context.Context, direction string) *sortedFetch
 	return &sortedFetchBuilder[T]{
 		mainCtx:   ctx,
 		direction: direction,
+		sorted:    srtd,
 	}
 }
 
@@ -235,7 +236,7 @@ func (s *sortedFetchBuilder[T]) WithRange(lowerbound int64, upperbound int64) *s
 }
 
 func (s *sortedFetchBuilder[T]) Exec() ([]T, error) {
-	if s.byScore {
+	if !s.byScore {
 		return s.sorted.sortedSetClient.Fetch(
 			s.mainCtx,
 			s.sorted.baseClient,
