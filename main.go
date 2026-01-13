@@ -80,10 +80,10 @@ func joinParam(keyFormat string, param []string) string {
 }
 
 type Relation interface {
-	GetByRandId(randId string) (interface{}, error)
+	GetByRandId(ctx context.Context, randId string) (interface{}, error)
 	GetItemAttribute() string
 	GetRandIdAttribute() string
-	SetItem(item interface{}) error
+	SetItem(ctx context.Context, item interface{}) error
 }
 
 type RelationFormat[T item.Blueprint] struct {

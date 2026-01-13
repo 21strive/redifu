@@ -11,6 +11,7 @@ const (
 	GreaterThan      = "gt"
 	LowerThanEqual   = "lte"
 	GreaterThanEqual = "gte"
+	Equal            = "eq"
 )
 
 type Builder struct {
@@ -28,7 +29,7 @@ type CursorCondition struct {
 	Operator string // "between", "lt", "gt", "lte", "gte", "<", ">", "<=", ">="
 }
 
-func New(table string, alias ...string) *Builder {
+func NewQuery(table string, alias ...string) *Builder {
 	b := &Builder{
 		table:      table,
 		orderDir:   "DESC",

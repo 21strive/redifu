@@ -84,8 +84,9 @@ func (p *Page[T]) GetSorted() *Sorted[T] {
 	return p.sorted
 }
 
-func (p *Page[T]) Fetch(page int64) *pageFetchBuilder[T] {
+func (p *Page[T]) Fetch(ctx context.Context, page int64) *pageFetchBuilder[T] {
 	return &pageFetchBuilder[T]{
+		mainCtx:       ctx,
 		page:          p,
 		pageNumber:    page,
 		params:        nil,

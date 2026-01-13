@@ -194,7 +194,7 @@ func (cr *SortedSet[T]) Fetch(
 					continue
 				}
 
-				relationItem, errGet := relationFormat.GetByRandId(relationRandId)
+				relationItem, errGet := relationFormat.GetByRandId(ctx, relationRandId)
 				if errGet != nil {
 					continue
 				}

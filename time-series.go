@@ -34,6 +34,14 @@ func NewTimeSeries[T item.Blueprint](
 	}
 }
 
+func (s *TimeSeries[T]) AddRelation(identifier string, relation Relation) {
+	s.sorted.AddRelation(identifier, relation)
+}
+
+func (s *TimeSeries[T]) GetRelation() map[string]Relation {
+	return s.sorted.GetRelation()
+}
+
 func (s *TimeSeries[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	s.sorted.SetExpiration(ctx, pipe, keyParams...)
 }
