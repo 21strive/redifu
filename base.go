@@ -68,9 +68,9 @@ func (cr *Base[T]) Set(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 	)
 
 	if keyParam != nil {
-		cr.DelBlank(ctx, pipe, keyParam...)
+		cr.ClearNotFound(ctx, pipe, keyParam...)
 	} else {
-		cr.DelBlank(ctx, pipe, item.GetRandId())
+		cr.ClearNotFound(ctx, pipe, item.GetRandId())
 	}
 
 	return nil
@@ -108,7 +108,7 @@ func (cr *Base[T]) Del(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 	return nil
 }
 
-func (cr *Base[T]) SetBlank(ctx context.Context, keyParam ...string) error {
+func (cr *Base[T]) MarkAsMissing(ctx context.Context, keyParam ...string) error {
 	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
@@ -125,7 +125,7 @@ func (cr *Base[T]) SetBlank(ctx context.Context, keyParam ...string) error {
 	return nil
 }
 
-func (cr *Base[T]) IsBlank(ctx context.Context, keyParam ...string) (bool, error) {
+func (cr *Base[T]) IsMissing(ctx context.Context, keyParam ...string) (bool, error) {
 	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
@@ -143,11 +143,18 @@ func (cr *Base[T]) IsBlank(ctx context.Context, keyParam ...string) (bool, error
 	return false, nil
 }
 
-func (cr *Base[T]) DelBlank(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
+func (cr *Base[T]) ClearNotFound(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
 	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
 	pipe.Del(ctx, key)
+}
+
+func (cr *Base[T]) Exists(ctx context.Context, keyParam ...string) error {
+	pipeline := cr.client.Pipeline()
+	cr.ClearNotFound(ctx, pipeline, keyParam...)
+	_, errPipe := pipeline.Exec(ctx)
+	return errPipe
 }
 
 func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *Base[T] {

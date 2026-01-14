@@ -147,11 +147,11 @@ func (s *TimelineSeeder[T]) runSeed(
 	}
 
 	if firstPage && counterLoop == 0 {
-		s.timelineClient.SetBlankPage(ctx, pipeline, keyParams...)
+		s.timelineClient.MarkEmpty(ctx, pipeline, keyParams...)
 	} else if firstPage && counterLoop > 0 && counterLoop < s.timelineClient.GetItemPerPage() {
-		s.timelineClient.SetFirstPage(ctx, pipeline, keyParams...)
+		s.timelineClient.MarkFirstPage(ctx, pipeline, keyParams...)
 	} else if !firstPage && subtraction+counterLoop < s.timelineClient.GetItemPerPage() {
-		s.timelineClient.SetLastPage(ctx, pipeline, keyParams...)
+		s.timelineClient.MarkLastPage(ctx, pipeline, keyParams...)
 	}
 
 	if firstPage {
@@ -293,7 +293,7 @@ func (s *SortedSeeder[T]) runSeed(
 	}
 
 	if counterLoop == 0 {
-		s.sortedClient.SetBlankPage(ctx, pipeline, keyParams...)
+		s.sortedClient.MarkEmpty(ctx, pipeline, keyParams...)
 	} else {
 		s.sortedClient.SetExpiration(ctx, pipeline, keyParams...)
 	}
@@ -424,7 +424,7 @@ func (p *PageSeeder[T]) runSeed(
 	}
 
 	if counterLoop == 0 {
-		p.pageClient.SetBlankPage(ctx, pipeline, page, keyParams...)
+		p.pageClient.MarkEmpty(ctx, pipeline, page, keyParams...)
 	} else {
 		p.pageClient.SetExpiration(ctx, pipeline, page, keyParams...)
 	}
@@ -557,7 +557,7 @@ func (s *TimeSeriesSeeder[T]) runSeed(
 		s.timeSeriesClient.SetExpiration(ctx, pipeline, keyParams...)
 	}
 
-	s.timeSeriesClient.AddPage(ctx, pipeline, lowerGap, upperGap, keyParams...)
+	s.timeSeriesClient.AddSegment(ctx, pipeline, lowerGap, upperGap, keyParams...)
 	_, errPipe := pipeline.Exec(pipeCtx)
 	return errPipe
 }

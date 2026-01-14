@@ -116,12 +116,12 @@ func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 	}
 
 	if !seed {
-		isBlankPage, errGet := cr.IsBlankPage(ctx, keyParams...)
+		isBlankPage, errGet := cr.IsEmpty(ctx, keyParams...)
 		if errGet != nil {
 			return errGet
 		}
 		if isBlankPage {
-			cr.DelBlankPage(ctx, pipe, keyParams...)
+			cr.HasData(ctx, pipe, keyParams...)
 		}
 
 		if cr.direction == Descending {
@@ -134,7 +134,7 @@ func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 				if score >= lowestScore {
 					if elementCount == cr.itemPerPage && isFirstPage {
-						cr.DelFirstPage(ctx, pipe, keyParams...)
+						cr.UnmarkFirstPage(ctx, pipe, keyParams...)
 					}
 					cr.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
 				}
@@ -149,7 +149,7 @@ func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 				if score <= highestScore {
 					if elementCount == cr.itemPerPage && isFirstPage {
-						cr.DelFirstPage(ctx, pipe, keyParams...)
+						cr.UnmarkFirstPage(ctx, pipe, keyParams...)
 					}
 					if isFirstPage || isLastPage {
 						cr.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
@@ -187,7 +187,7 @@ func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...stri
 	if isFirstPage {
 		numItem := cr.sortedSetClient.Count(ctx, keyParams...) // O(log(n))
 		if numItem == 0 {
-			cr.DelFirstPage(ctx, pipe, keyParams...)
+			cr.UnmarkFirstPage(ctx, pipe, keyParams...)
 		}
 	}
 
@@ -198,7 +198,7 @@ func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...stri
 	if isLastPage {
 		numItem := cr.sortedSetClient.Count(ctx, keyParams...)
 		if numItem == 0 {
-			cr.DelLastPage(ctx, pipe, keyParams...)
+			cr.UnmarkLastPage(ctx, pipe, keyParams...)
 		}
 	}
 
@@ -225,7 +225,7 @@ func (cr *Timeline[T]) IsFirstPage(ctx context.Context, keyParams ...string) (bo
 	return false, nil
 }
 
-func (cr *Timeline[T]) SetFirstPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (cr *Timeline[T]) MarkFirstPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	firstPageKey := sortedSetKey + ":firstpage"
 
@@ -237,7 +237,7 @@ func (cr *Timeline[T]) SetFirstPage(ctx context.Context, pipe redis.Pipeliner, k
 	)
 }
 
-func (cr *Timeline[T]) DelFirstPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (cr *Timeline[T]) UnmarkFirstPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	firstPageKey := sortedSetKey + ":firstpage"
 
@@ -263,7 +263,7 @@ func (cr *Timeline[T]) IsLastPage(ctx context.Context, keyParams ...string) (boo
 	return false, nil
 }
 
-func (cr *Timeline[T]) SetLastPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (cr *Timeline[T]) MarkLastPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":lastpage"
 
@@ -275,14 +275,14 @@ func (cr *Timeline[T]) SetLastPage(ctx context.Context, pipe redis.Pipeliner, ke
 	)
 }
 
-func (cr *Timeline[T]) DelLastPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (cr *Timeline[T]) UnmarkLastPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":lastpage"
 
 	pipe.Del(ctx, lastPageKey)
 }
 
-func (cr *Timeline[T]) IsBlankPage(ctx context.Context, keyParams ...string) (bool, error) {
+func (cr *Timeline[T]) IsEmpty(ctx context.Context, keyParams ...string) (bool, error) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	blankPageKey := sortedSetKey + ":blankpage"
 
@@ -301,7 +301,7 @@ func (cr *Timeline[T]) IsBlankPage(ctx context.Context, keyParams ...string) (bo
 	return false, nil
 }
 
-func (cr *Timeline[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (cr *Timeline[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -313,7 +313,7 @@ func (cr *Timeline[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, k
 	)
 }
 
-func (cr *Timeline[T]) DelBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (cr *Timeline[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(cr.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -466,8 +466,8 @@ func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, key
 	if count == 0 {
 		pipeline := b.client.Pipeline()
 
-		b.DelLastPage(ctx, pipeline, keyParams...)
-		b.DelFirstPage(ctx, pipeline, keyParams...)
+		b.UnmarkLastPage(ctx, pipeline, keyParams...)
+		b.UnmarkFirstPage(ctx, pipeline, keyParams...)
 
 		_, errPipe := pipeline.Exec(ctx)
 		if errPipe != nil {
@@ -475,7 +475,7 @@ func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, key
 		}
 	}
 
-	isBlankPage, err := b.IsBlankPage(ctx, keyParams...)
+	isBlankPage, err := b.IsEmpty(ctx, keyParams...)
 	if err != nil {
 		return false, err
 	}
@@ -528,9 +528,9 @@ func (t *timelineRemovalBuilder[T]) Exec() error {
 		return err
 	}
 
-	t.timeline.DelFirstPage(t.mainCtx, pipe, t.params...)
-	t.timeline.DelLastPage(t.mainCtx, pipe, t.params...)
-	t.timeline.DelBlankPage(t.mainCtx, pipe, t.params...)
+	t.timeline.UnmarkFirstPage(t.mainCtx, pipe, t.params...)
+	t.timeline.UnmarkLastPage(t.mainCtx, pipe, t.params...)
+	t.timeline.HasData(t.mainCtx, pipe, t.params...)
 
 	_, errPipe := pipe.Exec(t.mainCtx)
 	return errPipe

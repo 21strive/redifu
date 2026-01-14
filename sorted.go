@@ -88,12 +88,12 @@ func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 	}
 
 	if !seed {
-		isBlankPage, errGet := srtd.IsBlankPage(ctx, keyParams...)
+		isBlankPage, errGet := srtd.IsEmpty(ctx, keyParams...)
 		if errGet != nil {
 			return errGet
 		}
 		if isBlankPage {
-			errDelBlankPage := srtd.DelBlankPage(ctx, pipe, keyParams...)
+			errDelBlankPage := srtd.HasData(ctx, pipe, keyParams...)
 			if errDelBlankPage != nil {
 				return errDelBlankPage
 			}
@@ -132,7 +132,7 @@ func (srtd *Sorted[T]) Fetch(ctx context.Context, direction string) *sortedFetch
 	}
 }
 
-func (srtd *Sorted[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
+func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -144,7 +144,7 @@ func (srtd *Sorted[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, k
 	)
 }
 
-func (srtd *Sorted[T]) DelBlankPage(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+func (srtd *Sorted[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -152,7 +152,7 @@ func (srtd *Sorted[T]) DelBlankPage(ctx context.Context, pipe redis.Pipeliner, k
 	return nil
 }
 
-func (srtd *Sorted[T]) IsBlankPage(ctx context.Context, keyParams ...string) (bool, error) {
+func (srtd *Sorted[T]) IsEmpty(ctx context.Context, keyParams ...string) (bool, error) {
 	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
 	lastPageKey := sortedSetKey + ":blankpage"
 
@@ -172,7 +172,7 @@ func (srtd *Sorted[T]) IsBlankPage(ctx context.Context, keyParams ...string) (bo
 }
 
 func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string) (bool, error) {
-	isBlankPage, err := srtd.IsBlankPage(ctx, keyParams...)
+	isBlankPage, err := srtd.IsEmpty(ctx, keyParams...)
 	if err != nil {
 		return false, err
 	}

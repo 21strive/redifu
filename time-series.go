@@ -81,10 +81,10 @@ func (s *TimeSeries[T]) RemoveItem(ctx context.Context, item T, keyParams ...str
 	return s.sorted.RemoveItem(ctx, item, keyParams...)
 }
 
-// AddPage stores a seeded segment range in the segment store
+// AddSegment stores a seeded segment range in the segment store
 // Validates that the new segment doesn't overlap with any existing segment
 // Segments are stored in Redis Hash: field = lowerbound (string), value = upperbound (string)
-func (s *TimeSeries[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, lowerbound time.Time, upperbound time.Time, segmentStoreKeyParams ...string) error {
+func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lowerbound time.Time, upperbound time.Time, segmentStoreKeyParams ...string) error {
 	if !lowerbound.Before(upperbound) {
 		return fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
 	}
@@ -188,7 +188,7 @@ func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbou
 }
 
 // FindGap identifies gaps between seeded segments within the specified range
-// Since segments are guaranteed non-overlapping (enforced by AddPage), no merging is needed
+// Since segments are guaranteed non-overlapping (enforced by AddSegment), no merging is needed
 func (s *TimeSeries[T]) FindGap(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParams ...string) ([][]int64, error) {
 	if !lowerbound.Before(upperbound) {
 		return [][]int64{}, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
@@ -258,8 +258,8 @@ func (s *TimeSeries[T]) Remove(ctx context.Context, lowerbound time.Time, segmen
 	return s.redis.HDel(ctx, segmentStoreKey, fmt.Sprintf("%d", lowerbound.UnixMilli())).Err()
 }
 
-// GetAllSegments retrieves all stored segments, sorted by lower bound
-func (s *TimeSeries[T]) GetAllSegments(ctx context.Context, keyParams ...string) ([][]int64, error) {
+// GetSegments retrieves all stored segments, sorted by lower bound
+func (s *TimeSeries[T]) GetSegments(ctx context.Context, keyParams ...string) ([][]int64, error) {
 	segmentStoreKey := joinParam(s.segmentStoreKeyFormat, keyParams)
 
 	result, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()

@@ -44,9 +44,9 @@ func (p *Page[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, page 
 	p.sorted.SetExpiration(ctx, pipe, keyParams...)
 }
 
-func (p *Page[T]) SetBlankPage(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) {
+func (p *Page[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) {
 	keyParams = append(keyParams, strconv.FormatInt(page, 10))
-	p.sorted.SetBlankPage(ctx, pipe, keyParams...)
+	p.sorted.MarkEmpty(ctx, pipe, keyParams...)
 }
 
 func (p *Page[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) {
