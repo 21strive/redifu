@@ -124,9 +124,8 @@ func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...stri
 	return errPipe
 }
 
-func (srtd *Sorted[T]) Fetch(ctx context.Context, direction string) *sortedFetchBuilder[T] {
+func (srtd *Sorted[T]) Fetch(direction string) *sortedFetchBuilder[T] {
 	return &sortedFetchBuilder[T]{
-		mainCtx:   ctx,
 		direction: direction,
 		sorted:    srtd,
 	}
@@ -187,26 +186,23 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 	}
 }
 
-func (srtd *Sorted[T]) Remove(ctx context.Context) *sortedRemoveBuilder[T] {
+func (srtd *Sorted[T]) Remove() *sortedRemoveBuilder[T] {
 	return &sortedRemoveBuilder[T]{
 		srtd:      srtd,
-		mainCtx:   ctx,
 		keyParams: nil,
 		purge:     false,
 	}
 }
 
-func (srtd *Sorted[T]) Purge(ctx context.Context) *sortedRemoveBuilder[T] {
+func (srtd *Sorted[T]) Purge() *sortedRemoveBuilder[T] {
 	return &sortedRemoveBuilder[T]{
 		srtd:      srtd,
-		mainCtx:   ctx,
 		keyParams: nil,
 		purge:     true,
 	}
 }
 
 type sortedFetchBuilder[T item.Blueprint] struct {
-	mainCtx       context.Context
 	direction     string
 	sorted        *Sorted[T]
 	keyParams     []string
@@ -235,10 +231,10 @@ func (s *sortedFetchBuilder[T]) WithRange(lowerbound int64, upperbound int64) *s
 	return s
 }
 
-func (s *sortedFetchBuilder[T]) Exec() ([]T, error) {
+func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 	if !s.byScore {
 		return s.sorted.sortedSetClient.Fetch(
-			s.mainCtx,
+			ctx,
 			s.sorted.baseClient,
 			s.direction,
 			s.processor,
@@ -247,7 +243,7 @@ func (s *sortedFetchBuilder[T]) Exec() ([]T, error) {
 			0, -1, false, s.keyParams...)
 	} else {
 		return s.sorted.sortedSetClient.Fetch(
-			s.mainCtx,
+			ctx,
 			s.sorted.baseClient,
 			s.direction,
 			s.processor,
@@ -260,7 +256,6 @@ func (s *sortedFetchBuilder[T]) Exec() ([]T, error) {
 
 type sortedRemoveBuilder[T item.Blueprint] struct {
 	srtd      *Sorted[T]
-	mainCtx   context.Context
 	keyParams []string
 	purge     bool
 }
@@ -270,28 +265,28 @@ func (s *sortedRemoveBuilder[T]) WithParams(params ...string) *sortedRemoveBuild
 	return s
 }
 
-func (s *sortedRemoveBuilder[T]) Exec() error {
+func (s *sortedRemoveBuilder[T]) Exec(ctx context.Context) error {
 	pipe := s.srtd.client.Pipeline()
 
 	if s.purge {
-		fetchedItems, err := s.srtd.Fetch(s.mainCtx, Ascending).WithParams(s.keyParams...).Exec()
+		fetchedItems, err := s.srtd.Fetch(Ascending).WithParams(s.keyParams...).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
 		for _, fetchedItem := range fetchedItems {
-			errDelItem := s.srtd.baseClient.Del(s.mainCtx, pipe, fetchedItem)
+			errDelItem := s.srtd.baseClient.Del(ctx, pipe, fetchedItem)
 			if errDelItem != nil {
 				return errDelItem
 			}
 		}
 	}
 
-	err := s.srtd.sortedSetClient.Delete(s.mainCtx, pipe, s.keyParams...)
+	err := s.srtd.sortedSetClient.Delete(ctx, pipe, s.keyParams...)
 	if err != nil {
 		return err
 	}
 
-	_, errPipe := pipe.Exec(s.mainCtx)
+	_, errPipe := pipe.Exec(ctx)
 	return errPipe
 }

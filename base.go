@@ -68,9 +68,9 @@ func (cr *Base[T]) Set(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 	)
 
 	if keyParam != nil {
-		cr.ClearNotFound(ctx, pipe, keyParam...)
+		cr.UnmarkMissing(ctx, pipe, keyParam...)
 	} else {
-		cr.ClearNotFound(ctx, pipe, item.GetRandId())
+		cr.UnmarkMissing(ctx, pipe, item.GetRandId())
 	}
 
 	return nil
@@ -143,7 +143,7 @@ func (cr *Base[T]) IsMissing(ctx context.Context, keyParam ...string) (bool, err
 	return false, nil
 }
 
-func (cr *Base[T]) ClearNotFound(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
+func (cr *Base[T]) UnmarkMissing(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
 	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
@@ -152,7 +152,7 @@ func (cr *Base[T]) ClearNotFound(ctx context.Context, pipe redis.Pipeliner, keyP
 
 func (cr *Base[T]) Exists(ctx context.Context, keyParam ...string) error {
 	pipeline := cr.client.Pipeline()
-	cr.ClearNotFound(ctx, pipeline, keyParam...)
+	cr.UnmarkMissing(ctx, pipeline, keyParam...)
 	_, errPipe := pipeline.Exec(ctx)
 	return errPipe
 }

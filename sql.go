@@ -60,13 +60,11 @@ func (s *TimelineSeeder[T]) findOne(ctx context.Context, rowQuery string, rowSca
 }
 
 func (s *TimelineSeeder[T]) Seed(
-	ctx context.Context,
 	subtraction int64,
 	lastRandId string,
 	queryBuilder *Builder,
 ) *timelineSeedBuilder[T] {
 	return &timelineSeedBuilder[T]{
-		mainCtx:        ctx,
 		timelineSeeder: s,
 		subtraction:    subtraction,
 		lastRandId:     lastRandId,
@@ -168,7 +166,6 @@ func (s *TimelineSeeder[T]) runSeed(
 }
 
 type timelineSeedBuilder[T SQLItemBlueprint] struct {
-	mainCtx        context.Context
 	timelineSeeder *TimelineSeeder[T]
 	queryBuilder   *Builder
 	subtraction    int64
@@ -187,13 +184,13 @@ func (t *timelineSeedBuilder[T]) WithParams(keyParams ...string) *timelineSeedBu
 	return t
 }
 
-func (t *timelineSeedBuilder[T]) Exec(rowScanner RowScanner[T], rowsScanner RowsScanner[T]) error {
+func (t *timelineSeedBuilder[T]) Exec(ctx context.Context, rowScanner RowScanner[T], rowsScanner RowsScanner[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	}
 
 	return t.timelineSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.queryBuilder.Row("randid"),
 		t.queryBuilder.Base(),
 		t.queryBuilder.WithCursor(),
@@ -205,13 +202,13 @@ func (t *timelineSeedBuilder[T]) Exec(rowScanner RowScanner[T], rowsScanner Rows
 		t.keyParams...)
 }
 
-func (t *timelineSeedBuilder[T]) ExecWithRelation(rowScanner RowScanner[T], rowsScanner RowsScannerWithRelation[T]) error {
+func (t *timelineSeedBuilder[T]) ExecWithRelation(ctx context.Context, rowScanner RowScanner[T], rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(t.mainCtx, rows, t.timelineSeeder.timelineClient.relation)
+		return rowsScanner(ctx, rows, t.timelineSeeder.timelineClient.relation)
 	}
 
 	return t.timelineSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.queryBuilder.Row("randid"),
 		t.queryBuilder.Base(),
 		t.queryBuilder.WithCursor(),
@@ -244,9 +241,8 @@ func NewSortedSeeder[T SQLItemBlueprint](
 	}
 }
 
-func (s *SortedSeeder[T]) Seed(ctx context.Context, queryBuilder *Builder) *sortedSeedBuilder[T] {
+func (s *SortedSeeder[T]) Seed(queryBuilder *Builder) *sortedSeedBuilder[T] {
 	return &sortedSeedBuilder[T]{
-		mainCtx:      ctx,
 		sortedSeeder: s,
 		query:        queryBuilder.Base(),
 	}
@@ -303,7 +299,6 @@ func (s *SortedSeeder[T]) runSeed(
 }
 
 type sortedSeedBuilder[T SQLItemBlueprint] struct {
-	mainCtx      context.Context
 	sortedSeeder *SortedSeeder[T]
 	query        string
 	queryArgs    []interface{}
@@ -320,13 +315,13 @@ func (t *sortedSeedBuilder[T]) WithParams(keyParams ...string) *sortedSeedBuilde
 	return t
 }
 
-func (t *sortedSeedBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
+func (t *sortedSeedBuilder[T]) Exec(ctx context.Context, rowsScanner RowsScanner[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	}
 
 	return t.sortedSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.query,
 		t.queryArgs,
 		scanFunc,
@@ -334,13 +329,13 @@ func (t *sortedSeedBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 	)
 }
 
-func (t *sortedSeedBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T]) error {
+func (t *sortedSeedBuilder[T]) ExecWithRelation(ctx context.Context, rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(t.mainCtx, rows, t.sortedSeeder.sortedClient.relation)
+		return rowsScanner(ctx, rows, t.sortedSeeder.sortedClient.relation)
 	}
 
 	return t.sortedSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.query,
 		t.queryArgs,
 		scanFunc,
@@ -369,12 +364,11 @@ func NewPageSeeder[T SQLItemBlueprint](
 	}
 }
 
-func (p *PageSeeder[T]) Seed(ctx context.Context, page int64, query *Builder) *pageSeederBuilder[T] {
+func (p *PageSeeder[T]) Seed(page int64, query *Builder) *pageSeederBuilder[T] {
 	offset := (page - 1) * p.pageClient.itemPerPage
 	adjustedQuery := query.Base() + " LIMIT " + strconv.FormatInt(p.pageClient.itemPerPage, 10) + " OFFSET " + strconv.FormatInt(offset, 10)
 
 	return &pageSeederBuilder[T]{
-		mainCtx:       ctx,
 		pageSeeder:    p,
 		page:          page,
 		adjustedQuery: adjustedQuery,
@@ -436,7 +430,6 @@ func (p *PageSeeder[T]) runSeed(
 }
 
 type pageSeederBuilder[T SQLItemBlueprint] struct {
-	mainCtx       context.Context
 	pageSeeder    *PageSeeder[T]
 	page          int64
 	adjustedQuery string
@@ -454,13 +447,13 @@ func (t *pageSeederBuilder[T]) WithParams(keyParams ...string) *pageSeederBuilde
 	return t
 }
 
-func (t *pageSeederBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
+func (t *pageSeederBuilder[T]) Exec(ctx context.Context, rowsScanner RowsScanner[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	}
 
 	return t.pageSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.adjustedQuery,
 		t.queryArgs,
 		t.page,
@@ -468,13 +461,13 @@ func (t *pageSeederBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
 		t.keyParams...)
 }
 
-func (t *pageSeederBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T]) error {
+func (t *pageSeederBuilder[T]) ExecWithRelation(ctx context.Context, rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(t.mainCtx, rows, t.pageSeeder.pageClient.relation)
+		return rowsScanner(ctx, rows, t.pageSeeder.pageClient.relation)
 	}
 
 	return t.pageSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.adjustedQuery,
 		t.queryArgs,
 		t.page,
@@ -504,12 +497,10 @@ func NewTimeSeriesSeeder[T SQLItemBlueprint](
 }
 
 func (s *TimeSeriesSeeder[T]) Seed(
-	ctx context.Context,
 	query *Builder,
 	lowerbound time.Time,
 	upperbound time.Time) *timeSeriesBuilder[T] {
 	return &timeSeriesBuilder[T]{
-		mainCtx:          ctx,
 		timeSeriesSeeder: s,
 		query:            query.Base(),
 		lowerBound:       lowerbound,
@@ -563,7 +554,6 @@ func (s *TimeSeriesSeeder[T]) runSeed(
 }
 
 type timeSeriesBuilder[T SQLItemBlueprint] struct {
-	mainCtx          context.Context
 	timeSeriesSeeder *TimeSeriesSeeder[T]
 	query            string
 	queryArgs        []interface{}
@@ -582,9 +572,9 @@ func (t *timeSeriesBuilder[T]) WithParams(keyParams ...string) *timeSeriesBuilde
 	return t
 }
 
-func (t *timeSeriesBuilder[T]) ValidateRange() error {
+func (t *timeSeriesBuilder[T]) ValidateRange(ctx context.Context) error {
 	gaps, errFindGaps := t.timeSeriesSeeder.timeSeriesClient.FindGap(
-		t.mainCtx,
+		ctx,
 		t.lowerBound, t.upperBound, t.keyParams...)
 	if errFindGaps != nil {
 		return errFindGaps
@@ -600,28 +590,28 @@ func (t *timeSeriesBuilder[T]) ValidateRange() error {
 	return nil
 }
 
-func (t *timeSeriesBuilder[T]) Exec(rowsScanner RowsScanner[T]) error {
+func (t *timeSeriesBuilder[T]) Exec(ctx context.Context, rowsScanner RowsScanner[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
 		return rowsScanner(rows)
 	}
 
-	t.ValidateRange()
+	t.ValidateRange(ctx)
 	return t.timeSeriesSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.query,
 		t.queryArgs,
 		t.lowerBound,
 		t.upperBound, scanFunc, t.keyParams...)
 }
 
-func (t *timeSeriesBuilder[T]) ExecWithRelation(rowsScanner RowsScannerWithRelation[T]) error {
+func (t *timeSeriesBuilder[T]) ExecWithRelation(ctx context.Context, rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(t.mainCtx, rows, t.timeSeriesSeeder.timeSeriesClient.sorted.relation)
+		return rowsScanner(ctx, rows, t.timeSeriesSeeder.timeSeriesClient.sorted.relation)
 	}
 
-	t.ValidateRange()
+	t.ValidateRange(ctx)
 	return t.timeSeriesSeeder.runSeed(
-		t.mainCtx,
+		ctx,
 		t.query,
 		t.queryArgs,
 		t.lowerBound,

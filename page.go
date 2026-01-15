@@ -84,9 +84,8 @@ func (p *Page[T]) GetSorted() *Sorted[T] {
 	return p.sorted
 }
 
-func (p *Page[T]) Fetch(ctx context.Context, page int64) *pageFetchBuilder[T] {
+func (p *Page[T]) Fetch(page int64) *pageFetchBuilder[T] {
 	return &pageFetchBuilder[T]{
-		mainCtx:       ctx,
 		page:          p,
 		pageNumber:    page,
 		params:        nil,
@@ -110,7 +109,7 @@ func (p *Page[T]) Purge(ctx context.Context, keyParams ...string) error {
 
 	for _, member := range result.Val() {
 		newParams := append(keyParams, member)
-		errPurge := p.sorted.Purge(ctx).WithParams(newParams...).Exec()
+		errPurge := p.sorted.Purge(ctx).WithParams(newParams...).Exec(ctx)
 		if errPurge != nil {
 			return errPurge
 		}
@@ -125,7 +124,6 @@ func (p *Page[T]) Purge(ctx context.Context, keyParams ...string) error {
 }
 
 type pageFetchBuilder[T item.Blueprint] struct {
-	mainCtx       context.Context
 	page          *Page[T]
 	pageNumber    int64
 	params        []string
@@ -144,9 +142,9 @@ func (f *pageFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), p
 	return f
 }
 
-func (f *pageFetchBuilder[T]) Exec() ([]T, error) {
+func (f *pageFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 	f.params = append(f.params, strconv.FormatInt(f.pageNumber, 10))
-	return f.page.sorted.Fetch(f.mainCtx, f.page.direction).
+	return f.page.sorted.Fetch(f.page.direction).
 		WithParams(f.params...).
-		WithProcessor(f.processor, f.processorArgs).Exec()
+		WithProcessor(f.processor, f.processorArgs).Exec(ctx)
 }

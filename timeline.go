@@ -320,9 +320,8 @@ func (cr *Timeline[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyPar
 	pipe.Del(ctx, lastPageKey)
 }
 
-func (cr *Timeline[T]) Fetch(ctx context.Context, lastRandId []string) *timelineFetchBuilder[T] {
+func (cr *Timeline[T]) Fetch(lastRandId []string) *timelineFetchBuilder[T] {
 	return &timelineFetchBuilder[T]{
-		mainCtx:       ctx,
 		timeline:      cr,
 		lastRandIds:   lastRandId,
 		params:        nil,
@@ -332,9 +331,8 @@ func (cr *Timeline[T]) Fetch(ctx context.Context, lastRandId []string) *timeline
 	}
 }
 
-func (cr *Timeline[T]) FetchAll(ctx context.Context) *timelineFetchBuilder[T] {
+func (cr *Timeline[T]) FetchAll() *timelineFetchBuilder[T] {
 	return &timelineFetchBuilder[T]{
-		mainCtx:       ctx,
 		timeline:      cr,
 		lastRandIds:   nil,
 		params:        nil,
@@ -344,18 +342,16 @@ func (cr *Timeline[T]) FetchAll(ctx context.Context) *timelineFetchBuilder[T] {
 	}
 }
 
-func (cr *Timeline[T]) Remove(ctx context.Context) *timelineRemovalBuilder[T] {
+func (cr *Timeline[T]) Remove() *timelineRemovalBuilder[T] {
 	return &timelineRemovalBuilder[T]{
-		mainCtx:  ctx,
 		timeline: cr,
 		params:   nil,
 		purge:    false,
 	}
 }
 
-func (cr *Timeline[T]) Purge(ctx context.Context) *timelineRemovalBuilder[T] {
+func (cr *Timeline[T]) Purge() *timelineRemovalBuilder[T] {
 	return &timelineRemovalBuilder[T]{
-		mainCtx:  ctx,
 		timeline: cr,
 		params:   nil,
 		purge:    true,
@@ -363,7 +359,6 @@ func (cr *Timeline[T]) Purge(ctx context.Context) *timelineRemovalBuilder[T] {
 }
 
 type timelineFetchBuilder[T item.Blueprint] struct {
-	mainCtx       context.Context
 	timeline      *Timeline[T]
 	lastRandIds   []string
 	params        []string
@@ -383,7 +378,7 @@ func (b *timelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}
 	return b
 }
 
-func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
+func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) ([]T, string, string, error) {
 	var items []T
 	var validLastRandId string
 	var position string
@@ -398,7 +393,7 @@ func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 	stop := b.timeline.itemPerPage - 1
 
 	for i := len(b.lastRandIds) - 1; i >= 0; i-- {
-		count, errZCard := b.timeline.client.ZCard(b.mainCtx, sortedSetKey).Result()
+		count, errZCard := b.timeline.client.ZCard(ctx, sortedSetKey).Result()
 		if errZCard != nil {
 			return nil, validLastRandId, position, errZCard
 		}
@@ -406,16 +401,16 @@ func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 			return nil, validLastRandId, position, ResetPagination
 		}
 
-		item, err := b.timeline.baseClient.Get(b.mainCtx, b.lastRandIds[i])
+		item, err := b.timeline.baseClient.Get(ctx, b.lastRandIds[i])
 		if err != nil {
 			continue
 		}
 
 		var rank *redis.IntCmd
 		if b.timeline.direction == Descending {
-			rank = b.timeline.client.ZRevRank(b.mainCtx, sortedSetKey, item.GetRandId())
+			rank = b.timeline.client.ZRevRank(ctx, sortedSetKey, item.GetRandId())
 		} else {
-			rank = b.timeline.client.ZRank(b.mainCtx, sortedSetKey, item.GetRandId())
+			rank = b.timeline.client.ZRank(ctx, sortedSetKey, item.GetRandId())
 		}
 
 		if rank.Err() == nil {
@@ -432,7 +427,7 @@ func (b *timelineFetchBuilder[T]) Exec() ([]T, string, string, error) {
 	}
 
 	items, errFetch := b.timeline.sortedSetClient.Fetch(
-		b.mainCtx,
+		ctx,
 		b.timeline.baseClient,
 		b.timeline.direction,
 		b.processor,
@@ -498,7 +493,6 @@ func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, key
 }
 
 type timelineRemovalBuilder[T item.Blueprint] struct {
-	mainCtx  context.Context
 	timeline *Timeline[T]
 	params   []string
 	purge    bool
@@ -509,29 +503,29 @@ func (t *timelineRemovalBuilder[T]) WithParams(params ...string) *timelineRemova
 	return t
 }
 
-func (t *timelineRemovalBuilder[T]) Exec() error {
+func (t *timelineRemovalBuilder[T]) Exec(ctx context.Context) error {
 	pipe := t.timeline.client.Pipeline()
 
 	if t.purge {
-		items, _, _, err := t.timeline.FetchAll(t.mainCtx).WithParams(t.params...).Exec()
+		items, _, _, err := t.timeline.FetchAll().WithParams(t.params...).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
 		for _, item := range items {
-			t.timeline.baseClient.Del(t.mainCtx, pipe, item)
+			t.timeline.baseClient.Del(ctx, pipe, item)
 		}
 	}
 
-	err := t.timeline.sortedSetClient.Delete(t.mainCtx, pipe, t.params...)
+	err := t.timeline.sortedSetClient.Delete(ctx, pipe, t.params...)
 	if err != nil {
 		return err
 	}
 
-	t.timeline.UnmarkFirstPage(t.mainCtx, pipe, t.params...)
-	t.timeline.UnmarkLastPage(t.mainCtx, pipe, t.params...)
-	t.timeline.HasData(t.mainCtx, pipe, t.params...)
+	t.timeline.UnmarkFirstPage(ctx, pipe, t.params...)
+	t.timeline.UnmarkLastPage(ctx, pipe, t.params...)
+	t.timeline.HasData(ctx, pipe, t.params...)
 
-	_, errPipe := pipe.Exec(t.mainCtx)
+	_, errPipe := pipe.Exec(ctx)
 	return errPipe
 }

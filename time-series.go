@@ -243,9 +243,8 @@ func (s *TimeSeries[T]) calculateGaps(segments [][]int64, lowerbound, upperbound
 }
 
 // Fetch retrieves data from seeded segments within the specified range
-func (s *TimeSeries[T]) Fetch(ctx context.Context, lowerbound time.Time, upperbound time.Time) *fetchTimeSeriesBuilder[T] {
+func (s *TimeSeries[T]) Fetch(lowerbound time.Time, upperbound time.Time) *fetchTimeSeriesBuilder[T] {
 	return &fetchTimeSeriesBuilder[T]{
-		mainCtx:    ctx,
 		timeSeries: s,
 		lowerbound: lowerbound,
 		upperbound: upperbound,
@@ -300,7 +299,6 @@ func (s *TimeSeries[T]) CountSegments(ctx context.Context, keyParams ...string) 
 }
 
 type fetchTimeSeriesBuilder[T item.Blueprint] struct {
-	mainCtx       context.Context
 	timeSeries    *TimeSeries[T]
 	lowerbound    time.Time
 	upperbound    time.Time
@@ -320,12 +318,12 @@ func (f *fetchTimeSeriesBuilder[T]) WithProcessor(processor func(item *T, args [
 	return f
 }
 
-func (f *fetchTimeSeriesBuilder[T]) Exec() ([]T, bool, error) {
+func (f *fetchTimeSeriesBuilder[T]) Exec(ctx context.Context) ([]T, bool, error) {
 	if !f.lowerbound.Before(f.upperbound) {
 		return nil, false, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", f.lowerbound.Format(time.RFC3339), f.upperbound.Format(time.RFC3339))
 	}
 
-	gaps, errFindGaps := f.timeSeries.FindGap(f.mainCtx, f.lowerbound, f.upperbound, f.keyParams...)
+	gaps, errFindGaps := f.timeSeries.FindGap(ctx, f.lowerbound, f.upperbound, f.keyParams...)
 	if errFindGaps != nil {
 		return nil, false, errFindGaps
 	}
@@ -337,11 +335,11 @@ func (f *fetchTimeSeriesBuilder[T]) Exec() ([]T, bool, error) {
 	lowerboundUnix := f.lowerbound.UnixMilli()
 	upperboundUnix := f.upperbound.UnixMilli()
 
-	result, errFetch := f.timeSeries.sorted.Fetch(f.mainCtx, Descending).
+	result, errFetch := f.timeSeries.sorted.Fetch(Descending).
 		WithParams(f.keyParams...).
 		WithRange(lowerboundUnix, upperboundUnix).
 		WithProcessor(f.processor, f.processorArgs).
-		Exec()
+		Exec(ctx)
 	if errFetch != nil {
 		return nil, false, errFetch
 	}
