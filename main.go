@@ -114,10 +114,43 @@ func (r *RelationFormat[T]) SetItem(ctx context.Context, item interface{}) error
 	return r.base.Upsert(ctx, typedItem)
 }
 
-func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {
-	relation := &RelationFormat[T]{}
-	relation.base = base
-	relation.itemAttribute = itemAttributeName
-	relation.randIdAttribute = randIdAttributeName
-	return relation
+// func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {
+func NewRelation[T item.Blueprint](base *Base[T], parentType reflect.Type) *RelationFormat[T] {
+	//relation := &RelationFormat[T]{}
+	//relation.base = base
+	//relation.itemAttribute = itemAttributeName
+	//relation.randIdAttribute = randIdAttributeName
+	//return relation
+
+	// Get the type of the related entity (T)
+	var relatedSample T
+	relatedType := reflect.TypeOf(relatedSample)
+
+	// Handle pointer types
+	if parentType.Kind() == reflect.Ptr {
+		parentType = parentType.Elem()
+	}
+
+	// Find field in parent struct that matches the related type
+	for i := 0; i < parentType.NumField(); i++ {
+		field := parentType.Field(i)
+
+		if field.Type == relatedType {
+			// Found matching field! Use convention: FieldName + "RandID"
+			itemAttr := field.Name              // e.g., "Account"
+			randIdAttr := field.Name + "RandId" // e.g., "AccountRandID"
+
+			return &RelationFormat[T]{
+				base:            base,
+				itemAttribute:   itemAttr,
+				randIdAttribute: randIdAttr,
+			}
+		}
+	}
+
+	panic(fmt.Sprintf("no field of type %v found in %s", relatedType, parentType.Name()))
+}
+
+func TypeOf[T any]() reflect.Type {
+	return reflect.TypeOf((*T)(nil)).Elem()
 }

@@ -109,7 +109,7 @@ func (p *Page[T]) Purge(ctx context.Context, keyParams ...string) error {
 
 	for _, member := range result.Val() {
 		newParams := append(keyParams, member)
-		errPurge := p.sorted.Purge(ctx).WithParams(newParams...).Exec(ctx)
+		errPurge := p.sorted.Purge().WithParams(newParams...).Exec(ctx)
 		if errPurge != nil {
 			return errPurge
 		}

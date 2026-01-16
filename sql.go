@@ -157,7 +157,7 @@ func (s *TimelineSeeder[T]) runSeed(
 	}
 
 	// pipeline execution
-	_, err = pipeline.Exec(context.TODO())
+	_, err = pipeline.Exec(ctx)
 	if err != nil {
 		return err
 	}
@@ -263,7 +263,7 @@ func (s *SortedSeeder[T]) runSeed(
 		return QueryOrScannerNotConfigured
 	}
 
-	rows, err := s.db.QueryContext(context.TODO(), query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -391,7 +391,7 @@ func (p *PageSeeder[T]) runSeed(
 		return QueryOrScannerNotConfigured
 	}
 
-	rows, err := p.db.QueryContext(context.TODO(), query, args...)
+	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -400,7 +400,6 @@ func (p *PageSeeder[T]) runSeed(
 	var counterLoop int64
 
 	// pipeline preparation
-	pipeCtx := context.Background()
 	pipeline := p.redis.Pipeline()
 
 	for rows.Next() {
@@ -425,7 +424,7 @@ func (p *PageSeeder[T]) runSeed(
 
 	p.pageClient.AddPage(ctx, pipeline, page, keyParams...)
 
-	_, errPipe := pipeline.Exec(pipeCtx)
+	_, errPipe := pipeline.Exec(ctx)
 	return errPipe
 }
 
@@ -518,13 +517,12 @@ func (s *TimeSeriesSeeder[T]) runSeed(
 	keyParams ...string) error {
 	queryArgs = append(queryArgs, lowerGap, upperGap)
 
-	rows, err := s.db.QueryContext(context.TODO(), query, queryArgs...)
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	pipeCtx := context.Background()
 	pipeline := s.redis.Pipeline()
 
 	isSortedExists := s.timeSeriesClient.Count(ctx, keyParams...) > 0
@@ -549,7 +547,7 @@ func (s *TimeSeriesSeeder[T]) runSeed(
 	}
 
 	s.timeSeriesClient.AddSegment(ctx, pipeline, lowerGap, upperGap, keyParams...)
-	_, errPipe := pipeline.Exec(pipeCtx)
+	_, errPipe := pipeline.Exec(ctx)
 	return errPipe
 }
 
