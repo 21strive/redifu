@@ -34,7 +34,6 @@ func (f FetchOutput[T]) Error() error {
 	return f.error
 }
 
-type Timeline[T item.Blueprint] struct 
 type Timeline[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
