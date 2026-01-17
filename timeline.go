@@ -11,6 +11,11 @@ import (
 
 var ResetPagination = errors.New("reset pagination")
 
+type FetchOutput[T item.Blueprint] struct {
+	Items       []T
+	ValidLastId string
+	Position    string
+}
 type Timeline[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
@@ -378,14 +383,14 @@ func (b *timelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}
 	return b
 }
 
-func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) ([]T, string, string, error) {
+func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) (FetchOutput[T], error) {
 	var items []T
 	var validLastRandId string
 	var position string
 
 	// safety net
 	if b.timeline.direction == "" {
-		return nil, validLastRandId, position, errors.New("must set direction!")
+		return FetchOutput[T]{}, errors.New("must set direction!")
 	}
 
 	sortedSetKey := joinParam(b.timeline.sortedSetClient.sortedSetKeyFormat, b.params)
@@ -395,10 +400,10 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) ([]T, string, string
 	for i := len(b.lastRandIds) - 1; i >= 0; i-- {
 		count, errZCard := b.timeline.client.ZCard(ctx, sortedSetKey).Result()
 		if errZCard != nil {
-			return nil, validLastRandId, position, errZCard
+			return FetchOutput[T]{}, errZCard
 		}
 		if count == 0 {
-			return nil, validLastRandId, position, ResetPagination
+			return FetchOutput[T]{}, ResetPagination
 		}
 
 		item, err := b.timeline.baseClient.Get(ctx, b.lastRandIds[i])
@@ -438,7 +443,7 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) ([]T, string, string
 		false,
 		b.params...)
 	if errFetch != nil {
-		return nil, validLastRandId, position, errFetch
+		return FetchOutput[T]{}, errFetch
 	}
 
 	if start == 0 {
@@ -449,7 +454,11 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) ([]T, string, string
 		position = MiddlePage
 	}
 
-	return items, validLastRandId, position, nil
+	return FetchOutput[T]{
+		Items:       items,
+		ValidLastId: validLastRandId,
+		Position:    position,
+	}, nil
 }
 
 func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, keyParams ...string) (bool, error) {
@@ -507,12 +516,12 @@ func (t *timelineRemovalBuilder[T]) Exec(ctx context.Context) error {
 	pipe := t.timeline.client.Pipeline()
 
 	if t.purge {
-		items, _, _, err := t.timeline.FetchAll().WithParams(t.params...).Exec(ctx)
+		fetchOutput, err := t.timeline.FetchAll().WithParams(t.params...).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
-		for _, item := range items {
+		for _, item := range fetchOutput.Items {
 			t.timeline.baseClient.Del(ctx, pipe, item)
 		}
 	}
