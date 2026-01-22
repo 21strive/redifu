@@ -16,6 +16,19 @@ type Base[T item.Blueprint] struct {
 	timeToLive    time.Duration
 }
 
+type BaseWithPipeline[T item.Blueprint] struct {
+	baseClient *Base[T]
+	pipe       redis.Pipeliner
+}
+
+func (bw *BaseWithPipeline[T]) Set(ctx context.Context, item T) error {
+	return bw.baseClient.set(ctx, bw.pipe, item)
+}
+
+func (bw *BaseWithPipeline[T]) Del(ctx context.Context, item T) error {
+	return bw.baseClient.del(ctx, bw.pipe, item)
+}
+
 func (cr *Base[T]) Init(client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) {
 	cr.client = client
 	cr.itemKeyFormat = itemKeyFormat
@@ -43,7 +56,11 @@ func (cr *Base[T]) Get(ctx context.Context, keyParam string) (T, error) {
 	return fetchedItem, nil
 }
 
-func (cr *Base[T]) Set(ctx context.Context, pipe redis.Pipeliner, item T, keyParam ...string) error {
+func (cr *Base[T]) Set(ctx context.Context, item T, keyParam ...string) error {
+	return cr.set(ctx, nil, item, keyParam...)
+}
+
+func (cr *Base[T]) set(ctx context.Context, pipe redis.Pipeliner, item T, keyParam ...string) error {
 	if len(keyParam) > 1 {
 		return errors.New("only accept one keyParam")
 	}
@@ -60,33 +77,43 @@ func (cr *Base[T]) Set(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 	}
 
 	valueAsString := string(itemInByte)
-	pipe.Set(
-		ctx,
-		key,
-		valueAsString,
-		cr.timeToLive,
-	)
+
+	if pipe != nil {
+		pipe.Set(
+			ctx,
+			key,
+			valueAsString,
+			cr.timeToLive,
+		)
+	} else {
+		delRes := cr.client.Set(
+			ctx,
+			key,
+			valueAsString,
+			cr.timeToLive,
+		)
+		if delRes.Err() != nil {
+			return delRes.Err()
+		}
+	}
 
 	if keyParam != nil {
 		cr.UnmarkMissing(ctx, pipe, keyParam...)
 	} else {
-		cr.UnmarkMissing(ctx, pipe, item.GetRandId())
+		errUnmarkMissing := cr.UnmarkMissing(ctx, pipe, item.GetRandId())
+		if errUnmarkMissing != nil {
+			return errUnmarkMissing
+		}
 	}
 
 	return nil
 }
 
-func (cr *Base[T]) Upsert(ctx context.Context, item T, keyParam ...string) error {
-	pipeline := cr.client.Pipeline()
-	errSet := cr.Set(ctx, pipeline, item, keyParam...)
-	if errSet != nil {
-		return errSet
-	}
-	_, errPipe := pipeline.Exec(ctx)
-	return errPipe
+func (cr *Base[T]) Del(ctx context.Context, item T, keyParam ...string) error {
+	return cr.del(ctx, nil, item, keyParam...)
 }
 
-func (cr *Base[T]) Del(ctx context.Context, pipe redis.Pipeliner, item T, keyParam ...string) error {
+func (cr *Base[T]) del(ctx context.Context, pipe redis.Pipeliner, item T, keyParam ...string) error {
 	if len(keyParam) > 1 {
 		return errors.New("only accept one keyParam")
 	}
@@ -97,15 +124,26 @@ func (cr *Base[T]) Del(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 		key = fmt.Sprintf(cr.itemKeyFormat, item.GetRandId())
 	}
 
-	deleteRedis := pipe.Del(
-		ctx,
-		key,
-	)
-	if deleteRedis.Err() != nil {
-		return deleteRedis.Err()
+	if pipe != nil {
+		pipe.Del(
+			ctx,
+			key,
+		)
+	} else {
+		delRes := cr.client.Del(ctx, key)
+		if delRes.Err() != nil {
+			return delRes.Err()
+		}
 	}
 
 	return nil
+}
+
+func (cr *Base[T]) WithPipeline(pipe redis.Pipeliner) *BaseWithPipeline[T] {
+	return &BaseWithPipeline[T]{
+		baseClient: cr,
+		pipe:       pipe,
+	}
 }
 
 func (cr *Base[T]) MarkAsMissing(ctx context.Context, keyParam ...string) error {
@@ -143,18 +181,24 @@ func (cr *Base[T]) IsMissing(ctx context.Context, keyParam ...string) (bool, err
 	return false, nil
 }
 
-func (cr *Base[T]) UnmarkMissing(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) {
+func (cr *Base[T]) UnmarkMissing(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) error {
 	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
-	pipe.Del(ctx, key)
+	if pipe != nil {
+		pipe.Del(ctx, key)
+	} else {
+		delRes := cr.client.Del(ctx, key)
+		if delRes.Err() != nil {
+			return delRes.Err()
+		}
+	}
+
+	return nil
 }
 
 func (cr *Base[T]) Exists(ctx context.Context, keyParam ...string) error {
-	pipeline := cr.client.Pipeline()
-	cr.UnmarkMissing(ctx, pipeline, keyParam...)
-	_, errPipe := pipeline.Exec(ctx)
-	return errPipe
+	return cr.UnmarkMissing(ctx, nil, keyParam...)
 }
 
 func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) *Base[T] {

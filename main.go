@@ -111,7 +111,7 @@ func (r *RelationFormat[T]) SetItem(ctx context.Context, item interface{}) error
 		return fmt.Errorf("invalid item type: expected %T, got %T", *new(T), item)
 	}
 
-	return r.base.Upsert(ctx, typedItem)
+	return r.base.Set(ctx, typedItem)
 }
 
 // func NewRelation[T item.Blueprint](base *Base[T], itemAttributeName string, randIdAttributeName string) *RelationFormat[T] {

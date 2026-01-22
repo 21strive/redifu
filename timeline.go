@@ -104,7 +104,7 @@ func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParams ...string)
 	pipe := cr.client.Pipeline()
 
 	if errGet == redis.Nil {
-		errSet := cr.baseClient.Set(ctx, pipe, item)
+		errSet := cr.baseClient.WithPipeline(pipe).Set(ctx, item)
 		if errSet != nil {
 			return errSet
 		}
@@ -190,7 +190,7 @@ func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
 	pipe := cr.client.Pipeline()
 
-	errDelBase := cr.baseClient.Del(ctx, pipe, item)
+	errDelBase := cr.baseClient.WithPipeline(pipe).Del(ctx, item)
 	if errDelBase != nil {
 		return errDelBase
 	}
@@ -401,14 +401,14 @@ func (b *timelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}
 	return b
 }
 
-func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) FetchOutput[T] {
+func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 	var items []T
 	var validLastRandId string
 	var position string
 
 	// safety net
 	if b.timeline.direction == "" {
-		return FetchOutput[T]{error: errors.New("must set direction!")}
+		return &FetchOutput[T]{error: errors.New("must set direction!")}
 	}
 
 	sortedSetKey := joinParam(b.timeline.sortedSetClient.sortedSetKeyFormat, b.params)
@@ -418,10 +418,10 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) FetchOutput[T] {
 	for i := len(b.lastRandIds) - 1; i >= 0; i-- {
 		count, errZCard := b.timeline.client.ZCard(ctx, sortedSetKey).Result()
 		if errZCard != nil {
-			return FetchOutput[T]{error: errZCard}
+			return &FetchOutput[T]{error: errZCard}
 		}
 		if count == 0 {
-			return FetchOutput[T]{error: ResetPagination}
+			return &FetchOutput[T]{error: ResetPagination}
 		}
 
 		item, err := b.timeline.baseClient.Get(ctx, b.lastRandIds[i])
@@ -461,7 +461,7 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) FetchOutput[T] {
 		false,
 		b.params...)
 	if errFetch != nil {
-		return FetchOutput[T]{error: errFetch}
+		return &FetchOutput[T]{error: errFetch}
 	}
 
 	if start == 0 {
@@ -472,7 +472,7 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) FetchOutput[T] {
 		position = MiddlePage
 	}
 
-	return FetchOutput[T]{
+	return &FetchOutput[T]{
 		items:       items,
 		validLastId: validLastRandId,
 		position:    position,
@@ -541,7 +541,7 @@ func (t *timelineRemovalBuilder[T]) Exec(ctx context.Context) error {
 		}
 
 		for _, item := range fetchOutput.Items() {
-			t.timeline.baseClient.Del(ctx, pipe, item)
+			t.timeline.baseClient.WithPipeline(pipe).Del(ctx, item)
 		}
 	}
 
