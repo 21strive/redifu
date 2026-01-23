@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+type TimeSeriesWithPipeline[T item.Blueprint] struct {
+	timeSeries *TimeSeries[T]
+	pipe       redis.Pipeliner
+}
+
+func (t *TimeSeriesWithPipeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+	return t.timeSeries.addItem(ctx, t.pipe, item, keyParams...)
+}
+
+func (t *TimeSeriesWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
+	return t.timeSeries.sorted.WithPipeline(t.pipe).RemoveItem(ctx, item, keyParams...)
+}
+
 type TimeSeries[T item.Blueprint] struct {
 	redis                 redis.UniversalClient
 	segmentStoreKeyFormat string
@@ -50,7 +63,14 @@ func (s *TimeSeries[T]) Count(ctx context.Context, keyParams ...string) int64 {
 	return s.sorted.Count(ctx, keyParams...)
 }
 
-func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+func (s *TimeSeries[T]) WithPipeline(pipe redis.Pipeliner) *TimeSeriesWithPipeline[T] {
+	return &TimeSeriesWithPipeline[T]{
+		timeSeries: s,
+		pipe:       pipe,
+	}
+}
+
+func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
 	itemScore, errGetScore := getItemScore(item, s.sorted.sortingReference)
 	if errGetScore != nil {
 		return errGetScore
@@ -63,7 +83,13 @@ func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string
 		return errScan
 	}
 	if segment != nil && len(*segment) == 1 {
-		errAdd := s.sorted.AddItem(ctx, item, keyParams...)
+		var errAdd error
+		if pipe != nil {
+			errAdd = s.sorted.AddItem(ctx, item, keyParams...)
+		} else {
+			errAdd = s.sorted.WithPipeline(pipe).AddItem(ctx, item, keyParams...)
+		}
+
 		if errAdd != nil {
 			return errAdd
 		}
@@ -71,6 +97,10 @@ func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string
 	}
 
 	return nil
+}
+
+func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+	return s.addItem(ctx, nil, item, keyParams...)
 }
 
 func (s *TimeSeries[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {

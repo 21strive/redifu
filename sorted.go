@@ -14,6 +14,14 @@ type SortedWithPipeline[T item.Blueprint] struct {
 	pipeline redis.Pipeliner
 }
 
+func (sw *SortedWithPipeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+	return sw.sorted.addItem(ctx, sw.pipeline, item, keyParams...)
+}
+
+func (sw *SortedWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
+	return sw.sorted.removeItem(ctx, sw.pipeline, item, keyParams...)
+}
+
 type Sorted[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
@@ -62,13 +70,23 @@ func (srtd *Sorted[T]) Count(ctx context.Context, keyParams ...string) int64 {
 	return srtd.sortedSetClient.Count(ctx, keyParams...)
 }
 
-func (srtd *Sorted[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+func (srtd *Sorted[T]) WithPipeline(pipe redis.Pipeliner) *SortedWithPipeline[T] {
+	return &SortedWithPipeline[T]{
+		sorted:   srtd,
+		pipeline: pipe,
+	}
+}
+
+func (srtd *Sorted[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
 	_, errGet := srtd.baseClient.Get(ctx, item.GetRandId())
 	if errGet != nil && errors.Is(errGet, redis.Nil) {
 		return errGet
 	}
 
-	pipe := srtd.client.Pipeline()
+	var selfPipe bool
+	if pipe == nil {
+		pipe = srtd.client.Pipeline()
+	}
 
 	if errors.Is(errGet, redis.Nil) {
 		errSet := srtd.baseClient.WithPipeline(pipe).Set(ctx, item)
@@ -82,8 +100,16 @@ func (srtd *Sorted[T]) AddItem(ctx context.Context, item T, keyParams ...string)
 		return errIngest
 	}
 
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
+	if selfPipe {
+		_, errPipe := pipe.Exec(ctx)
+		return errPipe
+	}
+
+	return nil
+}
+
+func (srtd *Sorted[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+	return srtd.addItem(ctx, nil, item, keyParams...)
 }
 
 func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, seed bool, keyParams ...string) error {
@@ -114,8 +140,13 @@ func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 	return nil
 }
 
-func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
-	pipe := srtd.client.Pipeline()
+func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
+	var selfPipe bool
+	if pipe == nil {
+		selfPipe = true
+		pipe = srtd.client.Pipeline()
+	}
+
 	errDelBase := srtd.baseClient.WithPipeline(pipe).Del(ctx, item)
 	if errDelBase != nil {
 		return errDelBase
@@ -125,8 +156,17 @@ func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...stri
 	if errDel != nil {
 		return errDel
 	}
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
+
+	if selfPipe {
+		_, errPipe := pipe.Exec(ctx)
+		return errPipe
+	}
+
+	return nil
+}
+
+func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
+	return srtd.removeItem(ctx, nil, item, keyParams...)
 }
 
 func (srtd *Sorted[T]) Fetch(direction string) *sortedFetchBuilder[T] {

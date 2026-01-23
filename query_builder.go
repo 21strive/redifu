@@ -50,7 +50,7 @@ func NewQuery(table string, alias ...string) *Builder {
 }
 
 func (b *Builder) Select(cols string) *Builder {
-	b.selectCols = cols
+	b.selectCols = "SELECT " + cols
 	return b
 }
 
