@@ -4,9 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/redis/go-redis/v9"
 	"strconv"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type RowScanner[T SQLItemBlueprint] func(row *sql.Row) (T, error)
@@ -136,7 +137,7 @@ func (s *TimelineSeeder[T]) runSeed(
 			return err
 		}
 
-		s.baseClient.Set(ctx, pipeline, item)
+		s.baseClient.WithPipeline(pipeline).Set(ctx, item)
 		s.timelineClient.IngestItem(ctx, pipeline, item, true, keyParams...)
 		counterLoop++
 	}
@@ -280,8 +281,16 @@ func (s *SortedSeeder[T]) runSeed(
 			return errScan
 		}
 
-		s.baseClient.Set(ctx, pipeline, item)
-		s.sortedClient.IngestItem(ctx, pipeline, item, true, keyParams...)
+		errSet := s.baseClient.WithPipeline(pipeline).Set(ctx, item)
+		if errSet != nil {
+			return errSet
+		}
+
+		errIngest := s.sortedClient.IngestItem(ctx, pipeline, item, true, keyParams...)
+		if errIngest != nil {
+			return errIngest
+		}
+
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -408,8 +417,16 @@ func (p *PageSeeder[T]) runSeed(
 			return errScan
 		}
 
-		p.baseClient.Set(ctx, pipeline, item)
-		p.pageClient.IngestItem(ctx, pipeline, item, page, keyParams...)
+		errSet := p.baseClient.WithPipeline(pipeline).Set(ctx, item)
+		if errSet != nil {
+			return errSet
+		}
+
+		errIngest := p.pageClient.IngestItem(ctx, pipeline, item, page, keyParams...)
+		if errIngest != nil {
+			return errIngest
+		}
+
 		counterLoop++
 	}
 	if err = rows.Err(); err != nil {
@@ -533,11 +550,16 @@ func (s *TimeSeriesSeeder[T]) runSeed(
 			return errScan
 		}
 
-		s.baseClient.Set(ctx, pipeline, item)
-		err := s.timeSeriesClient.IngestItem(ctx, pipeline, item, keyParams...)
-		if err != nil {
-			return err
+		errSet := s.baseClient.WithPipeline(pipeline).Set(ctx, item)
+		if errSet != nil {
+			return errSet
 		}
+
+		errIngest := s.timeSeriesClient.IngestItem(ctx, pipeline, item, keyParams...)
+		if errIngest != nil {
+			return errIngest
+		}
+
 		counterLoop++
 	}
 

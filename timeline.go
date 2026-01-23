@@ -34,6 +34,19 @@ func (f FetchOutput[T]) Error() error {
 	return f.error
 }
 
+type TimelineWithPipeline[T item.Blueprint] struct {
+	timeline *Timeline[T]
+	pipeline redis.Pipeliner
+}
+
+func (t TimelineWithPipeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+	return t.timeline.addItem(ctx, t.pipeline, item, keyParams...)
+}
+
+func (t TimelineWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
+	return t.timeline.removeItem(ctx, t.pipeline, item, keyParams...)
+}
+
 type Timeline[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
@@ -96,12 +109,24 @@ func (cr *Timeline[T]) GetDirection() string {
 	return cr.direction
 }
 
-func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+func (cr *Timeline[T]) WithPipeline(pipe redis.Pipeliner) *TimelineWithPipeline[T] {
+	return &TimelineWithPipeline[T]{
+		timeline: cr,
+		pipeline: pipe,
+	}
+}
+
+func (cr *Timeline[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
 	_, errGet := cr.baseClient.Get(ctx, item.GetRandId())
 	if errGet != nil && errGet != redis.Nil {
 		return errGet
 	}
-	pipe := cr.client.Pipeline()
+
+	var selfPipe bool
+	if pipe == nil {
+		pipe = cr.client.Pipeline()
+		selfPipe = true
+	}
 
 	if errGet == redis.Nil {
 		errSet := cr.baseClient.WithPipeline(pipe).Set(ctx, item)
@@ -114,8 +139,17 @@ func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParams ...string)
 	if errIngest != nil {
 		return errIngest
 	}
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
+
+	if selfPipe {
+		_, errPipe := pipe.Exec(ctx)
+		return errPipe
+	}
+
+	return nil
+}
+
+func (cr *Timeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
+	return cr.addItem(ctx, nil, item, keyParams...)
 }
 
 func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, seed bool, keyParams ...string) error {
@@ -187,8 +221,12 @@ func (cr *Timeline[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 	return nil
 }
 
-func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
-	pipe := cr.client.Pipeline()
+func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
+
+	var selfPipe bool
+	if pipe == nil {
+		pipe = cr.client.Pipeline()
+	}
 
 	errDelBase := cr.baseClient.WithPipeline(pipe).Del(ctx, item)
 	if errDelBase != nil {
@@ -225,8 +263,16 @@ func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...stri
 		}
 	}
 
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
+	if selfPipe {
+		_, errPipe := pipe.Exec(ctx)
+		return errPipe
+	}
+
+	return nil
+}
+
+func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
+	return cr.removeItem(ctx, nil, item, keyParams...)
 }
 
 func (cr *Timeline[T]) IsFirstPage(ctx context.Context, keyParams ...string) (bool, error) {

@@ -9,6 +9,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type SortedWithPipeline[T item.Blueprint] struct {
+	sorted   *Sorted[T]
+	pipeline redis.Pipeliner
+}
+
 type Sorted[T item.Blueprint] struct {
 	client           redis.UniversalClient
 	baseClient       *Base[T]
@@ -66,7 +71,7 @@ func (srtd *Sorted[T]) AddItem(ctx context.Context, item T, keyParams ...string)
 	pipe := srtd.client.Pipeline()
 
 	if errors.Is(errGet, redis.Nil) {
-		errSet := srtd.baseClient.Set(ctx, pipe, item)
+		errSet := srtd.baseClient.WithPipeline(pipe).Set(ctx, item)
 		if errSet != nil {
 			return errSet
 		}
@@ -111,7 +116,7 @@ func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
 	pipe := srtd.client.Pipeline()
-	errDelBase := srtd.baseClient.Del(ctx, pipe, item)
+	errDelBase := srtd.baseClient.WithPipeline(pipe).Del(ctx, item)
 	if errDelBase != nil {
 		return errDelBase
 	}
@@ -275,7 +280,7 @@ func (s *sortedRemoveBuilder[T]) Exec(ctx context.Context) error {
 		}
 
 		for _, fetchedItem := range fetchedItems {
-			errDelItem := s.srtd.baseClient.Del(ctx, pipe, fetchedItem)
+			errDelItem := s.srtd.baseClient.WithPipeline(pipe).Del(ctx, fetchedItem)
 			if errDelItem != nil {
 				return errDelItem
 			}
