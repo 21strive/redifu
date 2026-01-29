@@ -21,12 +21,12 @@ type BaseWithPipeline[T item.Blueprint] struct {
 	pipe       redis.Pipeliner
 }
 
-func (bw *BaseWithPipeline[T]) Set(ctx context.Context, item T) error {
-	return bw.baseClient.set(ctx, bw.pipe, item)
+func (bw *BaseWithPipeline[T]) Set(ctx context.Context, item T, keyParams ...string) error {
+	return bw.baseClient.set(ctx, bw.pipe, item, keyParams...)
 }
 
-func (bw *BaseWithPipeline[T]) Del(ctx context.Context, item T) error {
-	return bw.baseClient.del(ctx, bw.pipe, item)
+func (bw *BaseWithPipeline[T]) Del(ctx context.Context, item T, keyParams ...string) error {
+	return bw.baseClient.del(ctx, bw.pipe, item, keyParams...)
 }
 
 func (cr *Base[T]) Init(client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) {
