@@ -25,7 +25,8 @@ type Builder struct {
 	orderCol       string
 	orderDir       string
 	conditions     []condition
-	cursorOperator string // Store cursor operator for WithCursor
+	cursorOperator string   // Store cursor operator for WithCursor
+	groupByCols    []string // Add this field
 }
 
 type condition struct {
@@ -36,10 +37,11 @@ type condition struct {
 
 func NewQuery(table string, alias ...string) *Builder {
 	b := &Builder{
-		table:      table,
-		orderDir:   "DESC",
-		joins:      []string{},
-		conditions: []condition{},
+		table:       table,
+		orderDir:    "DESC",
+		joins:       []string{},
+		conditions:  []condition{},
+		groupByCols: []string{}, // Initialize this
 	}
 
 	if len(alias) > 0 {
@@ -98,6 +100,12 @@ func (b *Builder) Where(column, operator string, joiner ...string) *Builder {
 	return b
 }
 
+// Add this method
+func (b *Builder) GroupBy(cols ...string) *Builder {
+	b.groupByCols = append(b.groupByCols, cols...)
+	return b
+}
+
 // Cursor sets the operator for cursor-based pagination
 // This allows users to specify how the cursor should compare (lt, lte, gt, gte, eq)
 func (b *Builder) Cursor(operator string) *Builder {
@@ -131,6 +139,12 @@ func (b *Builder) Base() string {
 	if len(b.conditions) > 0 {
 		query.WriteString("\nWHERE ")
 		b.buildConditions(&query, 1)
+	}
+
+	// Add GROUP BY - INSERT THIS BLOCK
+	if len(b.groupByCols) > 0 {
+		query.WriteString("\nGROUP BY ")
+		query.WriteString(strings.Join(b.groupByCols, ", "))
 	}
 
 	// Add ORDER BY
@@ -205,6 +219,12 @@ func (b *Builder) WithCursor() string {
 	query.WriteString(cursorOp)
 	query.WriteString(" $")
 	query.WriteString(fmt.Sprintf("%d", paramIdx))
+
+	// Add GROUP BY - INSERT THIS BLOCK
+	if len(b.groupByCols) > 0 {
+		query.WriteString("\nGROUP BY ")
+		query.WriteString(strings.Join(b.groupByCols, ", "))
+	}
 
 	// Add ORDER BY
 	query.WriteString("\nORDER BY ")
