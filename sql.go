@@ -104,8 +104,8 @@ func (s *TimelineSeeder[T]) runSeed(
 		} else {
 			firstPage = false
 			queryToUse = nextPageQuery
-			if s.scoringField != "" {
-				queryArgs = append(queryArgs, getFieldValue(reference, s.scoringField))
+			if s.timelineClient.sortingReference != "" {
+				queryArgs = append(queryArgs, getFieldValue(reference, s.timelineClient.sortingReference))
 			} else {
 				queryArgs = append(queryArgs, reference.GetCreatedAt())
 			}

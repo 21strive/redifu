@@ -38,7 +38,7 @@ type condition struct {
 func NewQuery(table string, alias ...string) *Builder {
 	b := &Builder{
 		table:       table,
-		orderDir:    "DESC",
+		orderDir:    Descending,
 		joins:       []string{},
 		conditions:  []condition{},
 		groupByCols: []string{}, // Initialize this
@@ -198,7 +198,7 @@ func (b *Builder) WithCursor() string {
 			cursorOp = "!="
 		default:
 			// Default based on order direction
-			if b.orderDir == "ASC" {
+			if b.orderDir == Ascending {
 				cursorOp = ">"
 			} else {
 				cursorOp = "<"
@@ -206,7 +206,7 @@ func (b *Builder) WithCursor() string {
 		}
 	} else {
 		// Default based on order direction
-		if b.orderDir == "ASC" {
+		if b.orderDir == Ascending {
 			cursorOp = ">"
 		} else {
 			cursorOp = "<"
