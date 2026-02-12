@@ -52,7 +52,7 @@ func NewQuery(table string, alias ...string) *Builder {
 }
 
 func (b *Builder) Select(cols string) *Builder {
-	b.selectCols = "SELECT " + cols
+	b.selectCols = cols
 	return b
 }
 
@@ -121,11 +121,38 @@ func (b *Builder) tableRef() string {
 }
 
 func (b *Builder) Row(idCol string) string {
-	return fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", b.table, idCol)
+	var query strings.Builder
+	query.WriteString("SELECT ")
+	query.WriteString(b.selectCols)
+	query.WriteString("\nFROM ")
+	query.WriteString(b.tableRef())
+
+	for _, join := range b.joins {
+		query.WriteString("\n")
+		query.WriteString(join)
+	}
+
+	var whereClause string
+	if b.alias != "" {
+		whereClause = fmt.Sprintf("\nWHERE %s.%s = $1", b.alias, idCol)
+	} else {
+		whereClause = fmt.Sprintf("\nWHERE %s = $1", idCol)
+	}
+
+	query.WriteString(whereClause)
+
+	// Add GROUP BY - INSERT THIS BLOCK
+	if len(b.groupByCols) > 0 {
+		query.WriteString("\nGROUP BY ")
+		query.WriteString(strings.Join(b.groupByCols, ", "))
+	}
+
+	return query.String()
 }
 
 func (b *Builder) Base() string {
 	var query strings.Builder
+	query.WriteString("SELECT ")
 	query.WriteString(b.selectCols)
 	query.WriteString("\nFROM ")
 	query.WriteString(b.tableRef())
@@ -160,6 +187,7 @@ func (b *Builder) Base() string {
 
 func (b *Builder) WithCursor() string {
 	var query strings.Builder
+	query.WriteString("SELECT ")
 	query.WriteString(b.selectCols)
 	query.WriteString("\nFROM ")
 	query.WriteString(b.tableRef())
