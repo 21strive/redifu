@@ -337,7 +337,7 @@ type fetchTimeSeriesBuilder[T item.Blueprint] struct {
 	processorArgs []interface{}
 }
 
-func (f *fetchTimeSeriesBuilder[T]) WithKeyParams(keyParams ...string) *fetchTimeSeriesBuilder[T] {
+func (f *fetchTimeSeriesBuilder[T]) WithParams(keyParams ...string) *fetchTimeSeriesBuilder[T] {
 	f.keyParams = keyParams
 	return f
 }
