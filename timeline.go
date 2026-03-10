@@ -226,6 +226,7 @@ func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 	var selfPipe bool
 	if pipe == nil {
 		pipe = cr.client.Pipeline()
+		selfPipe = true
 	}
 
 	errDelBase := cr.baseClient.WithPipeline(pipe).Del(ctx, item)
@@ -516,6 +517,10 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 		position = LastPage
 	} else {
 		position = MiddlePage
+	}
+
+	if items != nil && len(items) > 0 {
+		validLastRandId = items[len(items)-1].GetRandId()
 	}
 
 	return &FetchOutput[T]{
