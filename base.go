@@ -147,7 +147,7 @@ func (cr *Base[T]) WithPipeline(pipe redis.Pipeliner) *BaseWithPipeline[T] {
 }
 
 func (cr *Base[T]) MarkAsMissing(ctx context.Context, keyParam ...string) error {
-	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
+	key := joinParam(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
 	setBlank := cr.client.Set(
@@ -164,7 +164,7 @@ func (cr *Base[T]) MarkAsMissing(ctx context.Context, keyParam ...string) error 
 }
 
 func (cr *Base[T]) IsMissing(ctx context.Context, keyParam ...string) (bool, error) {
-	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
+	key := joinParam(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
 	getBlank := cr.client.Get(ctx, key)
@@ -182,7 +182,7 @@ func (cr *Base[T]) IsMissing(ctx context.Context, keyParam ...string) (bool, err
 }
 
 func (cr *Base[T]) UnmarkMissing(ctx context.Context, pipe redis.Pipeliner, keyParam ...string) error {
-	key := fmt.Sprintf(cr.itemKeyFormat, keyParam)
+	key := joinParam(cr.itemKeyFormat, keyParam)
 	key = key + ":blank"
 
 	if pipe != nil {

@@ -238,19 +238,13 @@ func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 	if err != nil {
 		return err
 	}
-	if err != nil {
-		return err
-	}
 
 	isFirstPage, errFirstPage := cr.IsFirstPage(ctx, keyParams...)
 	if errFirstPage != nil {
 		return errFirstPage
 	}
 	if isFirstPage {
-		numItem := cr.sortedSetClient.Count(ctx, keyParams...) // O(log(n))
-		if numItem == 0 {
-			cr.UnmarkFirstPage(ctx, pipe, keyParams...)
-		}
+		cr.UnmarkFirstPage(ctx, pipe, keyParams...)
 	}
 
 	isLastPage, errLastPage := cr.IsLastPage(ctx, keyParams...)
@@ -258,10 +252,7 @@ func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 		return errLastPage
 	}
 	if isLastPage {
-		numItem := cr.sortedSetClient.Count(ctx, keyParams...)
-		if numItem == 0 {
-			cr.UnmarkLastPage(ctx, pipe, keyParams...)
-		}
+		cr.UnmarkLastPage(ctx, pipe, keyParams...)
 	}
 
 	if selfPipe {
@@ -538,6 +529,10 @@ func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, key
 		return false, errZCard
 	}
 	if count == 0 {
+		// NOTE: There's a potential race between checking count and unmarking pages,
+		// but the impact is minimal - worst case is page markers are cleaned when
+		// they shouldn't be, which will be corrected on the next seeding check.
+
 		pipeline := b.client.Pipeline()
 
 		b.UnmarkLastPage(ctx, pipeline, keyParams...)

@@ -79,13 +79,14 @@ func (srtd *Sorted[T]) WithPipeline(pipe redis.Pipeliner) *SortedWithPipeline[T]
 
 func (srtd *Sorted[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
 	_, errGet := srtd.baseClient.Get(ctx, item.GetRandId())
-	if errGet != nil && errors.Is(errGet, redis.Nil) {
+	if errGet != nil && !errors.Is(errGet, redis.Nil) {
 		return errGet
 	}
 
 	var selfPipe bool
 	if pipe == nil {
 		pipe = srtd.client.Pipeline()
+		selfPipe = true
 	}
 
 	if errors.Is(errGet, redis.Nil) {
