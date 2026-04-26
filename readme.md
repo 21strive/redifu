@@ -220,3 +220,58 @@ TTL is configurable at initialization.
 
 - The built-in query builder only supports **PostgreSQL** (`$1, $2, ...`). For MySQL or complex queries, write SQL directly.
 - Sorting only supports fields of type `time.Time` or `int64`.
+
+---
+
+## Using with Claude Code
+
+Redifu ships with a `CLAUDE.consumer.md` template that teaches Claude Code to use redifu as the default Redis data layer across your Go backend projects — without you having to explain it each time.
+
+### Setup (one-time per project)
+
+**1. Copy the template into your project:**
+
+```bash
+cp path/to/redifu/CLAUDE.consumer.md your-project/CLAUDE.md
+```
+
+Or create a new `CLAUDE.md` and paste the contents of `CLAUDE.consumer.md` into it.
+
+**2. Customize the conventions section** at the bottom of the file to match your project:
+
+```markdown
+## Project conventions
+
+- Individual item TTL: **7 days**       ← adjust as needed
+- Sorted set / Timeline TTL: **2 days** ← adjust as needed
+- Default `itemPerPage`: **20**         ← adjust as needed
+- All redifu clients are initialized in a single `redis.go` or `cache.go` per domain
+- Seeders are called at the service/handler layer, not in the repository layer
+```
+
+### What Claude Code will do automatically
+
+Once `CLAUDE.md` is in place, Claude Code will:
+
+- Use `Base[T]` whenever a new get-by-ID endpoint is added
+- Propose `Timeline[T]` for any feed or "load more" list
+- Propose `Page[T]` for numbered pagination
+- Propose `TimeSeries[T]` for any date-range data query
+- Wire up `Relation` correctly when one entity references another
+- Generate scanner functions, seeder calls, and `ResetPagination` handling
+- Never write `redisClient.Set` / `redisClient.Get` directly for entity data
+
+### Example prompt after setup
+
+```
+Add a posts feed for each user. The feed should load 20 posts at a time,
+sorted by creation date descending. Posts have an author (Account entity).
+The existing SQL query is:
+
+  SELECT p.randid, p.title, p.content, p.author_randid, p.created_at
+  FROM posts p
+  WHERE p.user_id = $1 AND p.status = 'active'
+  ORDER BY p.created_at DESC
+```
+
+Claude Code will generate the full integration: `PostBase`, `PostTimeline`, `Relation` wiring, scanner functions, seeder, and fetch handler — all using redifu patterns.
