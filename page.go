@@ -13,7 +13,6 @@ type Page[T item.Blueprint] struct {
 	pageIndexKeyFormat string
 	sorted             *Sorted[T]
 	direction          string
-	relation           map[string]Relation
 	itemPerPage        int64
 }
 
@@ -61,10 +60,7 @@ func (p *Page[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, page int64,
 }
 
 func (p *Page[T]) AddRelation(identifier string, relationBase Relation) {
-	if p.relation == nil {
-		p.relation = make(map[string]Relation)
-	}
-	p.relation[identifier] = relationBase
+	p.sorted.AddRelation(identifier, relationBase)
 }
 
 func (p *Page[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, page int64, keyParams ...string) error {
@@ -73,7 +69,7 @@ func (p *Page[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, 
 }
 
 func (p *Page[T]) GetRelation() map[string]Relation {
-	return p.relation
+	return p.sorted.GetRelation()
 }
 
 func (p *Page[T]) GetItemPerPage() int64 {

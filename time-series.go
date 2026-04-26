@@ -136,8 +136,7 @@ func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lo
 		pipe.Expire(ctx, segmentStoreKey, s.timeToLive)
 	}
 
-	_, err := pipe.Exec(ctx)
-	return err
+	return nil
 }
 
 // validateNoOverlap ensures the new segment doesn't overlap with any existing segment
@@ -178,10 +177,6 @@ func (s *TimeSeries[T]) validateNoOverlap(ctx context.Context, lowerbound time.T
 // For inclusive intervals [a,b] and [c,d], they intersect if: upper > lowerbound AND lower < upperbound
 // Returns segments sorted by lower bound
 func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbound time.Time, keyParams ...string) (*[][]int64, error) {
-	if !lowerbound.Before(upperbound) {
-		return nil, fmt.Errorf("invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
-	}
-
 	// Convert to Unix timestamps for comparison
 	lowerboundUnix := lowerbound.UnixMilli()
 	upperboundUnix := upperbound.UnixMilli()
@@ -198,7 +193,6 @@ func (s *TimeSeries[T]) Scan(ctx context.Context, lowerbound time.Time, upperbou
 	for lowerStr, upperStr := range result {
 		lower, err1 := strconv.ParseInt(lowerStr, 10, 64)
 		upper, err2 := strconv.ParseInt(upperStr, 10, 64)
-
 		if err1 != nil || err2 != nil {
 			continue
 		}

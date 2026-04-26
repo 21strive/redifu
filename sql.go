@@ -479,7 +479,7 @@ func (t *pageSeederBuilder[T]) Exec(ctx context.Context, rowsScanner RowsScanner
 
 func (t *pageSeederBuilder[T]) ExecWithRelation(ctx context.Context, rowsScanner RowsScannerWithRelation[T]) error {
 	scanFunc := func(rows *sql.Rows) (T, error) {
-		return rowsScanner(ctx, rows, t.pageSeeder.pageClient.relation)
+		return rowsScanner(ctx, rows, t.pageSeeder.pageClient.GetRelation())
 	}
 
 	return t.pageSeeder.runSeed(
@@ -615,7 +615,9 @@ func (t *timeSeriesBuilder[T]) Exec(ctx context.Context, rowsScanner RowsScanner
 		return rowsScanner(rows)
 	}
 
-	t.ValidateRange(ctx)
+	if err := t.ValidateRange(ctx); err != nil {
+		return err
+	}
 	return t.timeSeriesSeeder.runSeed(
 		ctx,
 		t.query,
@@ -629,7 +631,9 @@ func (t *timeSeriesBuilder[T]) ExecWithRelation(ctx context.Context, rowsScanner
 		return rowsScanner(ctx, rows, t.timeSeriesSeeder.timeSeriesClient.sorted.relation)
 	}
 
-	t.ValidateRange(ctx)
+	if err := t.ValidateRange(ctx); err != nil {
+		return err
+	}
 	return t.timeSeriesSeeder.runSeed(
 		ctx,
 		t.query,
