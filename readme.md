@@ -1,4 +1,19 @@
-# Redifu
+<div align="center">
+<pre style="white-space: pre-wrap; overflow-x: hidden; background: transparent;">
+                █████████████           █████████                
+                ████████████          ███████████                
+                ██████████          █████████████                
+                ███████           ███████████████                
+                █████████████████████████████████                
+                ████████████████         ████████                
+                ██████████████           ████████                
+                ███████████              ████████                
+                █████████                ████████                
+
+</pre>
+</div>
+
+# redifu
 
 Go library for a Redis-backed data layer with **singleton behavior** — updating an entity once automatically reflects across every collection that references it, with no data duplication.
 
