@@ -190,25 +190,20 @@ postTimeline.AddRelation("author", authorRelation)
 
 ---
 
-## Seeder
+## Seeding
 
-Seeders populate Redis from a SQL database when a key has no data. Standard pattern:
+Redifu never touches your database. When a key has no data, you run your own SQL and feed the
+rows in through redifu's public methods:
 
 ```go
-func GetFeed(ctx context.Context, userRandId string, lastRandIds []string) ([]Post, error) {
+func GetFeed(ctx context.Context, userRandId string, lastRandIds []string) ([]*Post, error) {
     needsSeed, err := postTimeline.RequiresSeeding(ctx, int64(len(lastRandIds)), userRandId)
     if err != nil {
         return nil, err
     }
 
     if needsSeed {
-        seeder := redifu.NewTimelineSeeder[Post](redisClient, db, postBase, postTimeline)
-        err = seeder.
-            Seed(0, "", queryBuilder).
-            WithQueryArgs(userRandId).
-            WithParams(userRandId).
-            Exec(ctx, scanPostRow, scanPostRows)
-        if err != nil {
+        if err := seedFeed(ctx, userRandId); err != nil {
             return nil, err
         }
     }
@@ -216,9 +211,49 @@ func GetFeed(ctx context.Context, userRandId string, lastRandIds []string) ([]Po
     output := postTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
     return output.Items(), output.Error()
 }
+
+func seedFeed(ctx context.Context, userRandId string) error {
+    rows, err := db.QueryContext(ctx, `
+        SELECT p.randid, p.title, p.author_randid, p.created_at
+        FROM posts p
+        WHERE p.user_id = $1
+        ORDER BY p.created_at DESC
+        LIMIT 20`, userRandId)
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+
+    pipe := redisClient.Pipeline()
+    var count int64
+
+    for rows.Next() {
+        p := &Post{}
+        if err := rows.Scan(&p.RandId, &p.Title, &p.AuthorRandId, &p.CreatedAt); err != nil {
+            return err
+        }
+        postBase.WithPipeline(pipe).Set(ctx, p)
+        postTimeline.IngestItem(ctx, pipe, p, true, userRandId)
+        count++
+    }
+    if err := rows.Err(); err != nil {
+        return err
+    }
+
+    if count == 0 {
+        postTimeline.MarkEmpty(ctx, pipe, userRandId)
+    } else if count < postTimeline.GetItemPerPage() {
+        postTimeline.MarkFirstPage(ctx, pipe, userRandId)
+    }
+    postTimeline.SetExpiration(ctx, pipe, userRandId)
+
+    _, err = pipe.Exec(ctx)
+    return err
+}
 ```
 
-Seeders are available for all structures: `NewTimelineSeeder`, `NewSortedSeeder`, `NewPageSeeder`, `NewTimeSeriesSeeder`.
+One pipeline, one round trip. `CLAUDE.consumer.md` carries the same pattern for `Sorted`,
+`Page` and `TimeSeries`, plus the cursor handling a paged Timeline needs.
 
 ---
 
@@ -233,8 +268,8 @@ TTL is configurable at initialization.
 
 ## Limitations
 
-- The built-in query builder only supports **PostgreSQL** (`$1, $2, ...`). For MySQL or complex queries, write SQL directly.
-- Sorting only supports fields of type `time.Time` or `int64`.
+- Sorting only supports fields of type `time.Time`, `*time.Time` or `int64`.
+- Seeding is yours to write — redifu has no SQL layer, no query builder and no database dependency.
 
 ---
 
@@ -261,7 +296,7 @@ Or create a new `CLAUDE.md` and paste the contents of `CLAUDE.consumer.md` into 
 - Sorted set / Timeline TTL: **2 days** ← adjust as needed
 - Default `itemPerPage`: **20**         ← adjust as needed
 - All redifu clients are initialized in a single `redis.go` or `cache.go` per domain
-- Seeders are called at the service/handler layer, not in the repository layer
+- Seeding functions live at the service/handler layer, not in the repository layer
 ```
 
 ### What Claude Code will do automatically
@@ -273,7 +308,7 @@ Once `CLAUDE.md` is in place, Claude Code will:
 - Propose `Page[T]` for numbered pagination
 - Propose `TimeSeries[T]` for any date-range data query
 - Wire up `Relation` correctly when one entity references another
-- Generate scanner functions, seeder calls, and `ResetPagination` handling
+- Generate scanner functions, seeding functions, and `ResetPagination` handling
 - Never write `redisClient.Set` / `redisClient.Get` directly for entity data
 
 ### Example prompt after setup
@@ -289,4 +324,4 @@ The existing SQL query is:
   ORDER BY p.created_at DESC
 ```
 
-Claude Code will generate the full integration: `PostBase`, `PostTimeline`, `Relation` wiring, scanner functions, seeder, and fetch handler — all using redifu patterns.
+Claude Code will generate the full integration: `PostBase`, `PostTimeline`, `Relation` wiring, scanner functions, seeding function, and fetch handler — all using redifu patterns.

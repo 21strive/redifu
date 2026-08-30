@@ -58,7 +58,7 @@ Supported field types: `time.Time`, `*time.Time`, `int64`.
 timeline.SetSortingReference("UpdatedAt") // sort by UpdatedAt instead of CreatedAt
 ```
 
-`TimelineSeeder` reads `sortingReference` to determine which field to use when fetching the cursor reference from the DB (`getFieldValue` in `runSeed`). If `sortingReference` is set on the `Timeline`, the same field must be the `ORDER BY` column in the SQL queries passed to the seeder.
+If `sortingReference` is set, the same field must be the `ORDER BY` column in the SQL used to seed the collection, and the same field the cursor reference is read from.
 
 ---
 
@@ -130,30 +130,32 @@ These markers are set by seeders. Do not set them manually outside of a seeder.
 
 ---
 
-## Seeders
+## Seeding
 
-Seeders populate Redis from a SQL database. Each structure has a corresponding seeder:
+Redifu does not read from SQL. Populating Redis from a database is the consumer's job — they
+write plain SQL and a plain scan loop, then feed the results in through the primitives below.
 
-| Seeder | For |
-|--------|-----|
-| `TimelineSeeder[T]` | Timeline — manages cursor (`lastRandId`) and `subtraction` |
-| `SortedSeeder[T]` | Sorted — single Base query |
-| `PageSeeder[T]` | Page — Base query + LIMIT/OFFSET |
-| `TimeSeriesSeeder[T]` | TimeSeries — query by time range |
+Built-in seeders and the SQL `Builder` were removed: they could not express views, CTEs,
+subqueries or `WHERE IN`, and the scanner indirection they required cost more than the SQL it
+saved. Consumer-facing guidance and a worked example live in `CLAUDE.consumer.md`.
 
-`TimelineSeeder` is the most complex: the first page uses `Base()`, subsequent pages use `WithCursor()`. The `subtraction` parameter represents the gap between items already in Redis and the target `itemPerPage`.
+### Primitives a consumer seeder relies on
 
----
+| Method | Purpose |
+|--------|---------|
+| `Base.WithPipeline(pipe).Set` | store the item itself |
+| `IngestItem(ctx, pipe, item, seed, keyParams...)` | add to the index — pass `seed = true` while seeding |
+| `SetExpiration(ctx, pipe, keyParams...)` | apply the collection TTL |
+| `RequiresSeeding(...)` | decide whether seeding is needed at all |
+| `MarkEmpty` / `MarkFirstPage` / `MarkLastPage` | Timeline state markers (see above) |
+| `Page.AddPage` | register a page in the page index |
+| `TimeSeries.AddSegment` / `FindGap` | record and locate seeded time ranges |
 
-## Query Builder
+These are the only supported entry points for writing into a collection out of band. All of
+them take a caller-owned pipeline and must not execute it — see Pipeline Discipline.
 
-`Builder` in `query_builder.go` is a PostgreSQL SQL query generator (`$1, $2, ...`).
-
-- `Base()` — full query, used for seeding the first page
-- `WithCursor()` — appends a cursor condition, used for seeding subsequent pages
-- `Row(idCol)` — single-row query by ID, used by the seeder to fetch the cursor reference item
-
-**Limitation:** PostgreSQL only, no support for `WHERE IN`, subqueries, or `HAVING`. The query builder remains available but is not the primary approach — **writing SQL directly is preferred**.
+`subtraction` is a Timeline concept the consumer computes and applies themselves: the gap
+between what Redis already holds and `itemPerPage`, subtracted from the SQL `LIMIT`.
 
 ---
 
@@ -171,4 +173,4 @@ Seeders populate Redis from a SQL database. Each structure has a corresponding s
 
 - New data structures must compose from `Sorted[T]` or `Base[T]`, not rebuild directly from `SortedSet[T]`.
 - New methods that need a pipeline: follow the `publicMethod` (creates selfPipe) + `privateMethod` (receives pipe parameter) pattern.
-- New seeders: follow the `runSeed` + builder struct pattern with `WithQueryArgs`, `WithParams`, `Exec`.
+- Do not reintroduce SQL into this package. Anything that needs a database belongs in the consumer, driven by the seeding primitives above.

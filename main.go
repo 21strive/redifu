@@ -9,31 +9,6 @@ import (
 	"time"
 )
 
-var (
-	NoDatabaseProvided           = errors.New("No database provided!")
-	DocumentOrReferencesNotFound = errors.New("Document or References not found!")
-	QueryOrScannerNotConfigured  = errors.New("Required queries or scanner not configured")
-	NilConfiguration             = errors.New("No configuration found!")
-)
-
-func getFieldValue(obj interface{}, fieldName string) interface{} {
-	val := reflect.ValueOf(obj)
-	if val.Kind() == reflect.Ptr {
-		val = val.Elem()
-	}
-
-	if val.Kind() != reflect.Struct {
-		return time.Time{}
-	}
-
-	field := val.FieldByName(fieldName)
-	if !field.IsValid() {
-		return time.Time{}
-	}
-
-	return field.Interface()
-}
-
 func getItemScore[T item.Blueprint](item T, sortingReference string) (float64, error) {
 	if sortingReference == "" || sortingReference == "createdAt" {
 		if scorer, ok := interface{}(item).(interface{ GetCreatedAt() time.Time }); ok {
