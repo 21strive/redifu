@@ -179,7 +179,11 @@ Scan into `AuthorRandId`, never into `Author` — the Relation fills that at fet
 ## Relation — one entity, stored once
 
 > **Status:** describes the reworked Relation API on branch `redifu-simplified`.
-> Not yet implemented — `redifu.Relate` does not exist on `main`. Remove this note on merge.
+> Not yet implemented — `redifu.Relate` does not exist yet; the code still has
+> `redifu.NewRelation`. Remove this note on merge.
+>
+> Full guide, worked seeding/fetch examples and the migration table:
+> [`docs/plan-2026-08-30/01-relation.md`](docs/plan-2026-08-30/01-relation.md).
 
 A Relation is how an entity that appears inside many other entities is stored **once** and
 still shows up everywhere it is referenced.
