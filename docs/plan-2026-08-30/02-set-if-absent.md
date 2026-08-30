@@ -1,6 +1,6 @@
 # `SetIfAbsent` — TTL item diperbarui di setiap `AddItem`
 
-> **Status: rencana, belum ada di code.**
+> **Status: sudah diimplementasi** di branch `redifu-simplified`.
 > Prasyarat bagi argumen TTL di [`01-relation.md` §9](01-relation.md#9-yang-sengaja-tidak-dilakukan).
 > Dasar temuan: [`relation-evaluation.md`](../relation-evaluation.md).
 
@@ -218,9 +218,9 @@ Pakai `miniredis`. Yang wajib:
 
 ## 8. Checklist
 
-- [ ] `Base.SetIfAbsent` + `Base.setIfAbsent` ([`base.go`](../../base.go))
-- [ ] `BaseWithPipeline.SetIfAbsent` ([`base.go:19`](../../base.go#L19))
-- [ ] `Sorted.addItem` ([`sorted.go:80`](../../sorted.go#L80))
-- [ ] `Timeline.addItem` ([`timeline.go:119`](../../timeline.go#L119))
-- [ ] Empat test di §7
-- [ ] Kalimat semantik `AddItem` di `CLAUDE.md` dan `CLAUDE.consumer.md`
+- [x] `Base.SetIfAbsent` + `Base.setIfAbsent` ([`base.go`](../../base.go))
+- [x] `BaseWithPipeline.SetIfAbsent` ([`base.go:19`](../../base.go#L19))
+- [x] `Sorted.addItem` ([`sorted.go:80`](../../sorted.go#L80))
+- [x] `Timeline.addItem` ([`timeline.go:119`](../../timeline.go#L119))
+- [x] Empat test di §7
+- [x] Kalimat semantik `AddItem` di `CLAUDE.md` dan `CLAUDE.consumer.md`

@@ -178,10 +178,6 @@ Scan into `AuthorRandId`, never into `Author` — the Relation fills that at fet
 
 ## Relation — one entity, stored once
 
-> **Status:** describes the reworked Relation API on branch `redifu-simplified`.
-> Not yet implemented — `redifu.Relate` does not exist yet; the code still has
-> `redifu.NewRelation`. Remove this note on merge.
->
 > Full guide, worked seeding/fetch examples and the migration table:
 > [`docs/plan-2026-08-30/01-relation.md`](docs/plan-2026-08-30/01-relation.md).
 
@@ -747,14 +743,28 @@ func GetTransactions(ctx context.Context, accountRandId string, from, to time.Ti
 ## Standard pattern: Add / Update / Remove
 
 ```go
-// Add a new item to the timeline
+// Add a new item to the timeline. AddItem places the item into the index: it writes the
+// item only if Base does not hold it yet, but always refreshes its TTL.
 err = PostTimeline.AddItem(ctx, newPost, userRandId)
 
-// Update an item (update Base only — Relations reflect automatically)
+// Update an item (update Base only — Relations reflect automatically).
+// AddItem will not do this for you.
 err = PostBase.Set(ctx, updatedPost)
 
-// Remove an item from the timeline and Base
+// Remove an item from this timeline. The item stays in Base and in every other
+// collection that holds it.
 err = PostTimeline.RemoveItem(ctx, post, userRandId)
+
+// Delete the entity itself, because it is gone from the database. Any other index still
+// holding its randId comes back short until it is re-seeded or purged.
+pipe := redisClient.Pipeline()
+err = PostTimeline.WithPipeline(pipe).RemoveItem(ctx, post, userRandId)
+err = PostBase.WithPipeline(pipe).Del(ctx, post)
+_, err = pipe.Exec(ctx)
+
+// Invalidate a whole collection so the next fetch seeds it again from the database.
+// Item keys are left alone.
+err = PostTimeline.Purge(ctx, userRandId)
 ```
 
 ---
@@ -864,7 +874,8 @@ local `map[string]bool` if the payload is large.
 - Do not purge or re-seed a list because a related entity changed — write that entity's `Base` and every list reflects it
 - Do not use a value item type (`Base[Post]`) with Relations — `Relate` requires `Base[*Post]`
 - Do not call `pipe.Exec()` inside a function that receives `pipe` as a parameter
-- Do not delete an item with `Base.Del` alone — always use `RemoveItem` on its collection
+- Do not expect `RemoveItem` or `Purge` to delete an item — they only touch the index; deleting the entity is `Base.Del`, paired with a `RemoveItem` in the same pipeline
+- Do not use `AddItem` to update an item's contents — it only places the item into the index (and refreshes its TTL); use `Base.Set`
 - Do not ignore `redifu.ResetPagination` — always handle it by discarding the cursor and re-seeding from page one
 - Do not give a collection's sorted set a TTL longer than (or equal to) its `Base` TTL — `Base` must outlive the index
 - Do not apply `subtraction` to anything but a Timeline seeding function — it is a Timeline-only concept

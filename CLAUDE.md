@@ -11,7 +11,7 @@ Base[T]          → key-value, single source of truth per item
 SortedSet[T]     → sorted set, stores only randId as member
 ```
 
-All fetch operations always follow: `sorted set → list of randIds → Base.Get per id → resolve Relation`.
+All fetch operations always follow: `sorted set → list of randIds → one batched Base read → resolve Relations in one batch per relation`.
 
 ### Struct hierarchy
 
@@ -66,29 +66,46 @@ If `sortingReference` is set, the same field must be the `ORDER BY` column in th
 
 Relation is how redifu avoids data duplication across entities.
 
-**Field naming convention (required):**
+**Entity shape (two fields per relation):**
 ```go
 type Post struct {
-    Account       Account // related entity field
-    AccountRandId string  // always: FieldName + "RandId"
+    AccountRandId string   `json:"accountRandId"` // the pointer — this is what Redis stores
+    Account       *Account `json:"-"`             // filled on fetch, never serialized
 }
 ```
 
+Field names are free — nothing is inferred from them. The `json:"-"` tag is required: it is
+what keeps a fetched item safe to write back to `Base` without baking a copy of the related
+entity into the item key.
+
+**Item types must be pointers:** `Base[*Post]`, never `Base[Post]`. A Relation writes into
+your struct, which is only possible through a pointer. `Relate` rejects value types.
+
 **How it works during fetch:**
-1. `Post` is fetched from `Base[Post]` — `Account` field is empty, `AccountRandId` holds the ID
-2. Relation lookup: fetch `Account` from `Base[Account]` using `AccountRandId`
-3. Set into the `Account` field, clear `AccountRandId`
+1. The page of items is read from `Base` in one round-trip
+2. Per relation, the randIds are collected and deduped, then read in one batch
+3. Each fetched entity is written into its items; the randId is **kept**, not cleared
 
 **Effect:** Update `Account` once in `Base[Account]` → all `Post` records referencing it automatically reflect the change.
 
 **Setting up a Relation:**
 ```go
-relation, err := redifu.NewRelation[Account](&accountBase, redifu.TypeOf[Post]())
+relation, err := redifu.Relate(accountBase,
+    func(p *Post) string    { return p.AccountRandId }, // where the randId lives
+    func(p *Post, a *Account) { p.Account = a },        // where the entity goes
+)
 if err != nil {
-    // Account field not found in Post — naming convention mismatch
+    // wiring mistake — e.g. a value item type instead of a pointer
 }
-postTimeline.AddRelation("account", relation)
+postTimeline.AddRelation(relation)
 ```
+
+Both accessors are ordinary functions, so the compiler checks them: renaming a field breaks
+the build here instead of silently resolving to nothing at runtime. Register as many as the
+entity needs — `AddRelation(authorRelation, categoryRelation)` — they share one pipeline.
+
+If a related key has expired, that field comes back `nil` while the rest of the fetch
+succeeds. Guard for it. Full guide: `docs/plan-2026-08-30/01-relation.md`.
 
 ---
 
@@ -144,6 +161,8 @@ saved. Consumer-facing guidance and a worked example live in `CLAUDE.consumer.md
 | Method | Purpose |
 |--------|---------|
 | `Base.WithPipeline(pipe).Set` | store the item itself |
+| `Base.WithPipeline(pipe).SetIfAbsent` | store it only if absent, but always refresh its TTL |
+| `Base.GetMany(ctx, randIds)` | read many items in one round-trip |
 | `IngestItem(ctx, pipe, item, seed, keyParams...)` | add to the index — pass `seed = true` while seeding |
 | `SetExpiration(ctx, pipe, keyParams...)` | apply the collection TTL |
 | `RequiresSeeding(...)` | decide whether seeding is needed at all |
@@ -161,11 +180,12 @@ between what Redis already holds and `itemPerPage`, subtracted from the SQL `LIM
 
 ## Invariants to preserve
 
-1. **Never delete an item from Base without removing it from the index.** Always use `RemoveItem` (which handles both), not `Base.Del` alone.
+1. **Collections never delete `Base` keys.** `RemoveItem` only removes a member from one index; `Purge` only drops the index and its markers. Deleting the entity itself is `Base.Del`, and it is deliberate: any other index still holding that randId will come back short until it is re-seeded or purged. Prefer a leak that expires on its own over a hole that does not.
 2. **Functions that receive `pipe` must not call `pipe.Exec`.** See Pipeline Discipline above.
-3. **The Relation naming convention is required:** `FieldName` + `FieldNameRandId`.
+3. **A relation field must be tagged `json:"-"`** — without it, writing a fetched item back to `Base` bakes a copy of the related entity into the item key and breaks the singleton permanently.
 4. **Scores in sorted sets are always numeric:** Unix timestamp in milliseconds or `int64`. No other types.
-5. **`NewRelation` returns an error** — always handle it, never ignore it.
+5. **`Relate` returns an error** — always handle it at startup, never ignore it.
+6. **`AddItem` places an item into an index; it does not update the item.** It writes the item only when `Base` does not hold it yet, but always refreshes its TTL — so an index can never outlive the items it points at. To change an item's contents, use `Base.Set`.
 
 ---
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"time"
 
@@ -135,12 +134,11 @@ func (cr *SortedSet[T]) Fetch(
 	direction string,
 	processor func(item *T, args []interface{}),
 	processorArgs []interface{},
-	relation map[string]Relation,
+	relations []Relation[T],
 	start int64,
 	stop int64,
 	byScore bool,
 	keyParams ...string) ([]T, error) {
-	var items []T
 	if direction == "" {
 		return nil, errors.New("must set direction!")
 	}
@@ -169,52 +167,40 @@ func (cr *SortedSet[T]) Fetch(
 		return nil, result.Err()
 	}
 	listRandIds := result.Val()
+	if len(listRandIds) == 0 {
+		return nil, nil
+	}
 
-	for i := 0; i < len(listRandIds); i++ {
-		fetchedItem, err := baseClient.Get(ctx, listRandIds[i])
-		if err != nil {
+	// One round-trip for the whole page instead of one GET per randId.
+	fetchedItems, errGetMany := baseClient.GetMany(ctx, listRandIds)
+	if errGetMany != nil {
+		return nil, errGetMany
+	}
+
+	items := make([]T, 0, len(listRandIds))
+	for _, randId := range listRandIds {
+		fetchedItem, found := fetchedItems[randId]
+		if !found {
+			// The index outlived the item. Skip it rather than failing the page.
 			continue
 		}
-
-		if relation != nil {
-			for _, relationFormat := range relation {
-				v := reflect.ValueOf(fetchedItem)
-
-				if v.Kind() == reflect.Ptr {
-					v = v.Elem()
-				}
-
-				relationRandIdField := v.FieldByName(relationFormat.GetRandIdAttribute())
-				if !relationRandIdField.IsValid() {
-					continue
-				}
-
-				relationRandId := relationRandIdField.String()
-				if relationRandId == "" {
-					continue
-				}
-
-				relationItem, errGet := relationFormat.GetByRandId(ctx, relationRandId)
-				if errGet != nil {
-					continue
-				}
-
-				relationAttrField := v.FieldByName(relationFormat.GetItemAttribute())
-				if !relationAttrField.IsValid() || !relationAttrField.CanSet() {
-					continue
-				}
-
-				relationAttrField.Set(reflect.ValueOf(relationItem))
-				if relationRandIdField.CanSet() {
-					relationRandIdField.SetString("")
-				}
-			}
-		}
-		if processor != nil {
-			processor(&fetchedItem, processorArgs)
-		}
-
 		items = append(items, fetchedItem)
+	}
+
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	// Relations are resolved per relation for the whole page, not per item, so a related
+	// key shared by many items is read once.
+	if errRelation := resolveRelations(ctx, cr.client, relations, items); errRelation != nil {
+		return nil, errRelation
+	}
+
+	if processor != nil {
+		for i := range items {
+			processor(&items[i], processorArgs)
+		}
 	}
 
 	return items, nil

@@ -162,31 +162,38 @@ items, needsSeed, err := txTimeSeries.
 
 Relations prevent data duplication across entities that reference each other.
 
-**Field naming convention (required):**
+**Entity shape (two fields per relation):**
 
 ```go
 type Post struct {
     redifu.Record
-    Title         string
-    AuthorRandId  string          // reference: FieldName + "RandId"
-    Author        account.Account // related entity field
+    Title        string
+    AuthorRandId string           `json:"authorRandId"` // the pointer — this is what Redis stores
+    Author       *account.Account `json:"-"`            // filled on fetch, never serialized
 }
 ```
 
-`Author` is not stored inside `Post`. On fetch, redifu reads `AuthorRandId`, retrieves `Author` from `Base[Account]`, and injects it into the `Author` field. Because `Base[Account]` is the source of truth, any update to `Account` is immediately reflected in all `Post` records.
+`Author` is not stored inside `Post`. On fetch, redifu reads `AuthorRandId`, retrieves `Author` from `Base[*Account]`, and writes it into the `Author` field — keeping the randId, so the result is safe to write straight back to `Base`. Because `Base[*Account]` is the source of truth, any update to `Account` is immediately reflected in all `Post` records.
+
+Item types are pointers: `Base[*Post]`, never `Base[Post]`.
 
 **Setup:**
 
 ```go
-authorRelation, err := redifu.NewRelation[account.Account](
+authorRelation, err := redifu.Relate(
     account.AccountBase,
-    redifu.TypeOf[Post](),
+    func(p *Post) string              { return p.AuthorRandId }, // where the randId lives
+    func(p *Post, a *account.Account) { p.Author = a },          // where the entity goes
 )
 if err != nil {
     log.Fatal(err)
 }
-postTimeline.AddRelation("author", authorRelation)
+postTimeline.AddRelation(authorRelation)
 ```
+
+Both accessors are ordinary functions, so renaming a field breaks the build here rather than
+resolving to nothing at runtime. Relations are resolved per relation for the whole page, so a
+related key shared by twenty items is read once.
 
 ---
 
@@ -270,6 +277,32 @@ TTL is configurable at initialization.
 
 - Sorting only supports fields of type `time.Time`, `*time.Time` or `int64`.
 - Seeding is yours to write — redifu has no SQL layer, no query builder and no database dependency.
+- Relations resolve one level only: if a related entity has relations of its own, those stay empty.
+
+---
+
+## Breaking changes on `redifu-simplified`
+
+Rationale and migration detail: [`docs/plan-2026-08-30/`](docs/plan-2026-08-30/).
+
+| Change | Migration |
+|--------|-----------|
+| `NewRelation` and `TypeOf` removed | declare relations with `Relate(base, getRandId, setItem)` |
+| `AddRelation(identifier, rel)` → `AddRelation(rels ...Relation[T])` | drop the identifier — it was never used when resolving |
+| `GetRelation()` → `GetRelations()` | returns a slice, not a map |
+| Item types must be pointers | `Base[*Post]`, not `Base[Post]`; tag relation fields `json:"-"` |
+| `Sorted.Remove()` / `Timeline.Remove()` removed | use `Purge` — the two were identical once `Base` deletion was dropped |
+| `Purge()` builder → `Purge(ctx, keyParams...)` | `tl.Purge().WithParams(u).Exec(ctx)` becomes `tl.Purge(ctx, u)` |
+
+Two changes are **silent** — they compile unchanged but behave differently:
+
+- **`RemoveItem` no longer deletes the item from `Base`.** It only removes the member from that
+  one index. Deleting the entity is now `Base.Del`, paired with `RemoveItem` in the same
+  pipeline. Code that relied on the old behaviour now leaks a key that expires on its own,
+  instead of holing every other collection holding that item.
+- **A fetched item keeps its relation randId.** It used to be cleared, which made writing a
+  fetched item back to `Base` bake a copy of the related entity into the item key. Tag relation
+  fields `json:"-"` and the write-back is safe.
 
 ---
 

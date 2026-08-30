@@ -1,6 +1,6 @@
 # `RemoveItem` dan `Purge` — koleksi tidak pernah menghapus key `Base`
 
-> **Status: rencana, belum ada di code.**
+> **Status: sudah diimplementasi** di branch `redifu-simplified`.
 > Menutup [temuan #3](../relation-evaluation.md) — lubang index yang tidak berhubungan
 > dengan TTL, dan satu-satunya yang tersisa setelah
 > [`02-set-if-absent.md`](02-set-if-absent.md).
@@ -264,12 +264,12 @@ Pakai `miniredis`:
 
 ## 9. Checklist
 
-- [ ] Buang `Base.Del` dari `Sorted.removeItem` ([`sorted.go:151`](../../sorted.go#L151))
-- [ ] Buang `Base.Del` dari `Timeline.removeItem` ([`timeline.go:232`](../../timeline.go#L232))
-- [ ] Buang field `purge` + blok penghapusan `Base` dari kedua removal builder
-- [ ] Hapus (atau deprecate jadi alias) `Sorted.Remove()` dan `Timeline.Remove()`
-- [ ] `Purge` jadi method biasa; hapus `sortedRemoveBuilder` dan `timelineRemovalBuilder`
-- [ ] `HasData` di `sortedRemoveBuilder.Exec` ([`sorted.go:330`](../../sorted.go#L330))
-- [ ] Lima test di §8
-- [ ] Invariant #1 `CLAUDE.md` dan baris "What not to do" `CLAUDE.consumer.md`
-- [ ] Catatan rilis untuk perubahan perilaku senyap `RemoveItem`
+- [x] Buang `Base.Del` dari `Sorted.removeItem` ([`sorted.go:151`](../../sorted.go#L151))
+- [x] Buang `Base.Del` dari `Timeline.removeItem` ([`timeline.go:232`](../../timeline.go#L232))
+- [x] Buang field `purge` + blok penghapusan `Base` dari kedua removal builder
+- [x] Hapus (atau deprecate jadi alias) `Sorted.Remove()` dan `Timeline.Remove()`
+- [x] `Purge` jadi method biasa; hapus `sortedRemoveBuilder` dan `timelineRemovalBuilder`
+- [x] `HasData` di `sortedRemoveBuilder.Exec` ([`sorted.go:330`](../../sorted.go#L330))
+- [x] Lima test di §8
+- [x] Invariant #1 `CLAUDE.md` dan baris "What not to do" `CLAUDE.consumer.md`
+- [x] Catatan rilis untuk perubahan perilaku senyap `RemoveItem`

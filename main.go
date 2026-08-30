@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/21strive/item"
 	"reflect"
 	"time"
+
+	"github.com/21strive/item"
+	"github.com/redis/go-redis/v9"
 )
 
 func getItemScore[T item.Blueprint](item T, sortingReference string) (float64, error) {
@@ -54,64 +56,129 @@ func joinParam(keyFormat string, param []string) string {
 	return sortedSetKey
 }
 
-type Relation interface {
-	GetByRandId(ctx context.Context, randId string) (interface{}, error)
-	GetItemAttribute() string
-	GetRandIdAttribute() string
-	SetItem(ctx context.Context, item interface{}) error
+// Relation resolves an entity that is stored once in its own Base and referenced from
+// many parent items by randId. Implementations come from Relate; the interface is closed
+// so that a relation can only be built through it.
+type Relation[P any] interface {
+	// stage enqueues the reads for these items into the caller's pipeline and returns a
+	// function that writes the fetched entities into them once the pipeline has run.
+	stage(ctx context.Context, pipe redis.Pipeliner, items []P) (func() error, error)
 }
 
-type RelationFormat[T item.Blueprint] struct {
-	base            *Base[T]
-	itemAttribute   string
-	randIdAttribute string
+type relation[P any, R item.Blueprint] struct {
+	base      *Base[R]
+	getRandId func(P) string
+	setItem   func(P, R)
 }
 
-// Implement Relation interface
-func (r *RelationFormat[T]) GetByRandId(ctx context.Context, randId string) (interface{}, error) {
-	return r.base.Get(ctx, randId)
-}
+func (rl *relation[P, R]) stage(ctx context.Context, pipe redis.Pipeliner, items []P) (func() error, error) {
+	randIds := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
 
-func (r *RelationFormat[T]) GetItemAttribute() string {
-	return r.itemAttribute
-}
-
-func (r *RelationFormat[T]) GetRandIdAttribute() string {
-	return r.randIdAttribute
-}
-
-func (r *RelationFormat[T]) SetItem(ctx context.Context, item interface{}) error {
-	typedItem, ok := item.(T)
-	if !ok {
-		return fmt.Errorf("invalid item type: expected %T, got %T", *new(T), item)
+	for _, parent := range items {
+		randId := rl.getRandId(parent)
+		if randId == "" {
+			continue
+		}
+		if _, duplicate := seen[randId]; duplicate {
+			continue
+		}
+		seen[randId] = struct{}{}
+		randIds = append(randIds, randId)
 	}
 
-	return r.base.Set(ctx, typedItem)
-}
-
-func NewRelation[T item.Blueprint](base *Base[T], parentType reflect.Type) (*RelationFormat[T], error) {
-	var relatedSample T
-	relatedType := reflect.TypeOf(relatedSample)
-
-	if parentType.Kind() == reflect.Ptr {
-		parentType = parentType.Elem()
+	if len(randIds) == 0 {
+		return func() error { return nil }, nil
 	}
 
-	for i := 0; i < parentType.NumField(); i++ {
-		field := parentType.Field(i)
+	resolve := rl.base.stageGetMany(ctx, pipe, randIds)
 
-		if field.Type == relatedType {
-			return &RelationFormat[T]{
-				base:            base,
-				itemAttribute:   field.Name,
-				randIdAttribute: field.Name + "RandId",
-			}, nil
+	return func() error {
+		fetchedItems, err := resolve()
+		if err != nil {
+			return err
+		}
+
+		for _, parent := range items {
+			relatedItem, found := fetchedItems[rl.getRandId(parent)]
+			if !found {
+				// The related key has expired or been evicted. The parent is returned
+				// with that field left empty rather than failing the whole fetch.
+				continue
+			}
+			rl.setItem(parent, relatedItem)
+		}
+
+		return nil
+	}, nil
+}
+
+// Relate declares that parent items of type P carry a randId pointing at an entity stored
+// in base. Both accessors are ordinary functions, so the compiler checks them: renaming a
+// field breaks the build here instead of silently resolving to nothing at runtime.
+//
+//	authorRelation, err := redifu.Relate(account.AccountBase,
+//	    func(p *Post) string              { return p.AuthorRandId },
+//	    func(p *Post, a *account.Account) { p.Author = a },
+//	)
+//
+// P must be a pointer type — the setter has to mutate the item that was fetched.
+func Relate[P any, R item.Blueprint](
+	base *Base[R],
+	getRandId func(P) string,
+	setItem func(P, R),
+) (Relation[P], error) {
+	if base == nil {
+		return nil, errors.New("redifu: relation base must not be nil")
+	}
+	if getRandId == nil {
+		return nil, errors.New("redifu: relation randId accessor must not be nil")
+	}
+	if setItem == nil {
+		return nil, errors.New("redifu: relation setter must not be nil")
+	}
+
+	var parent P
+	parentType := reflect.TypeOf(&parent).Elem()
+	if parentType.Kind() != reflect.Pointer {
+		return nil, fmt.Errorf("redifu: relation parent %s must be a pointer type — declare the collection as Base[*%s], not Base[%s]", parentType, parentType, parentType)
+	}
+
+	return &relation[P, R]{
+		base:      base,
+		getRandId: getRandId,
+		setItem:   setItem,
+	}, nil
+}
+
+// resolveRelations fills every registered relation for a page of items. All relations
+// share a single pipeline, so a second relation costs no extra round-trip, and each
+// related key is read once no matter how many items point at it.
+func resolveRelations[T any](ctx context.Context, client redis.UniversalClient, relations []Relation[T], items []T) error {
+	if len(relations) == 0 || len(items) == 0 {
+		return nil
+	}
+
+	pipe := client.Pipeline()
+	applies := make([]func() error, 0, len(relations))
+
+	for _, relationFormat := range relations {
+		apply, err := relationFormat.stage(ctx, pipe, items)
+		if err != nil {
+			return err
+		}
+		applies = append(applies, apply)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return err
+	}
+
+	for _, apply := range applies {
+		if err := apply(); err != nil {
+			return err
 		}
 	}
 
-	return nil, fmt.Errorf("redifu: no field of type %v found in %s", relatedType, parentType.Name())
-}
-
-func TypeOf[T any]() reflect.Type {
-	return reflect.TypeOf((*T)(nil)).Elem()
+	return nil
 }

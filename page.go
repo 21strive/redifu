@@ -59,8 +59,8 @@ func (p *Page[T]) AddPage(ctx context.Context, pipe redis.Pipeliner, page int64,
 	pipe.Expire(ctx, key, p.sorted.timeToLive)
 }
 
-func (p *Page[T]) AddRelation(identifier string, relationBase Relation) {
-	p.sorted.AddRelation(identifier, relationBase)
+func (p *Page[T]) AddRelation(relations ...Relation[T]) {
+	p.sorted.AddRelation(relations...)
 }
 
 func (p *Page[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, page int64, keyParams ...string) error {
@@ -68,8 +68,8 @@ func (p *Page[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, 
 	return p.sorted.IngestItem(ctx, pipe, item, true, keyParams...)
 }
 
-func (p *Page[T]) GetRelation() map[string]Relation {
-	return p.sorted.GetRelation()
+func (p *Page[T]) GetRelations() []Relation[T] {
+	return p.sorted.GetRelations()
 }
 
 func (p *Page[T]) GetItemPerPage() int64 {
@@ -105,7 +105,7 @@ func (p *Page[T]) Purge(ctx context.Context, keyParams ...string) error {
 
 	for _, member := range result.Val() {
 		newParams := append(keyParams, member)
-		errPurge := p.sorted.Purge().WithParams(newParams...).Exec(ctx)
+		errPurge := p.sorted.Purge(ctx, newParams...)
 		if errPurge != nil {
 			return errPurge
 		}

@@ -1,11 +1,12 @@
 # Relation — Panduan Implementasi dan Rencana Penyederhanaan
 
-> **Status: rencana, belum ada di code.**
-> `redifu.Relate` yang dipakai di seluruh dokumen ini **belum diimplementasi**.
-> Yang ada di branch ini masih `redifu.NewRelation` — API lama, lihat
-> [Bagian 8 — Apa yang berubah](#8-apa-yang-berubah-dari-api-sekarang) untuk perbandingannya.
-> Dokumen ini adalah spesifikasi yang akan diimplementasi, ditulis dari sudut pandang
-> pemakai library supaya bisa dinilai enak dipakai atau tidak **sebelum** ditulis kodenya.
+> **Status: sudah diimplementasi** di branch `redifu-simplified`. `redifu.NewRelation`
+> dan `redifu.TypeOf` sudah dihapus — lihat
+> [Bagian 8 — Apa yang berubah](#8-apa-yang-berubah-dari-api-sekarang) untuk migrasinya.
+>
+> Dokumen ini ditulis lebih dulu sebagai spesifikasi, dari sudut pandang pemakai library,
+> supaya bisa dinilai enak dipakai atau tidak sebelum ada kodenya. Sekarang ia berfungsi
+> sebagai panduan pemakaian.
 >
 > Dasar temuan yang melatarbelakangi perubahan: [`relation-evaluation.md`](../relation-evaluation.md).
 
@@ -414,14 +415,18 @@ Fetch 20 post yang ditulis oleh 3 author berbeda, dengan 2 relasi terdaftar:
 
 ```
 1.  ZREVRANGE feed:user:u1:posts 0 19            → 20 randId
-2.  MGET post:p1 … post:p20                      → 20 post
+2.  PIPELINE { GET post:p1 … GET post:p20 }      → 20 post
 3.  kumpulkan randId per relasi, dedupe:
       author   → [a7, a9, a3]
       category → [c1, c2]
-    MGET account:a7 account:a9 account:a3
-    MGET category:c1 category:c2                 → satu pipeline
+    PIPELINE { GET account:a7, account:a9, account:a3,
+               GET category:c1, category:c2 }    → satu pipeline
 4.  sebar hasilnya ke tiap item lewat setter
 ```
+
+Pipeline berisi `GET` dipakai, bukan `MGET`, supaya tetap benar di Redis Cluster — key-key
+itu bisa jatuh di slot yang berbeda, dan `MGET` lintas-slot ditolak. Jumlah round-trip-nya
+sama.
 
 **Tiga round-trip**, bukan 60. `account:a7` diambil sekali, dipakai untuk berapa pun
 post yang merujuknya. Menambah relasi ketiga tidak menambah round-trip — semua relasi
@@ -576,14 +581,28 @@ func Relate[P any, R item.Blueprint](
 ) (Relation[P], error)
 ```
 
-`Resolve` menerima **seluruh halaman sekaligus** — di situlah dedupe dan `MGET`
-terjadi. Konsekuensinya `SortedSet.Fetch` tidak lagi resolve relasi per item di dalam
-loop; ia mengumpulkan item dulu, baru memanggil `Resolve` sekali per relasi.
+Relasi menerima **seluruh halaman sekaligus** — di situlah dedupe terjadi. Konsekuensinya
+`SortedSet.Fetch` tidak lagi resolve relasi per item di dalam loop; ia mengumpulkan item
+dulu, baru menyelesaikan tiap relasi sekali untuk seluruh halaman.
 
-Satu primitif baru yang dibutuhkan di `Base`:
+Bentuk yang diimplementasi memakai satu method tak-terekspor, supaya relasi hanya bisa
+dibuat lewat `Relate` dan supaya semua relasi bisa berbagi satu pipeline:
+
+```go
+type Relation[P any] interface {
+    stage(ctx context.Context, pipe redis.Pipeliner, items []P) (func() error, error)
+}
+```
+
+`stage` meng-enqueue pembacaannya ke pipeline milik pemanggil dan mengembalikan fungsi
+yang menuliskan hasilnya ke item setelah pipeline dieksekusi — sesuai Pipeline Discipline,
+ia tidak pernah memanggil `Exec` sendiri.
+
+Dua primitif baru di `Base`:
 
 ```go
 func (cr *Base[T]) GetMany(ctx context.Context, randIds []string) (map[string]T, error)
+func (cr *Base[T]) stageGetMany(ctx context.Context, pipe redis.Pipeliner, randIds []string) func() (map[string]T, error)
 ```
 
 Key yang miss cukup absen dari map — bukan error.
@@ -706,7 +725,7 @@ bekerja atas slice, jadi nesting tinggal membiarkan `Base` menyimpan relasinya s
 account.AccountBase.AddRelation(orgRelation)   // belum ada
 ```
 
-`Resolve` untuk author, setelah `MGET` account-nya selesai, memanggil relasi milik
+Penyelesaian relasi author, setelah pembacaan account-nya selesai, memanggil relasi milik
 account atas slice hasil itu. Biayanya satu round-trip tambahan **per tingkat**, bukan
 per item — tetap batched. Yang harus ikut dipikirkan saat mengimplementasinya: siklus
 (`Account` → `Post` → `Account`) butuh batas kedalaman atau daftar key yang sudah

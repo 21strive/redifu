@@ -1,14 +1,17 @@
 # Plan — 30 Agustus 2026
 
-Rencana perubahan yang belum diimplementasi, ditulis lebih dulu supaya bisa dinilai
-sebelum ada kode yang ditulis. Semuanya berangkat dari
-[`../relation-evaluation.md`](../relation-evaluation.md).
+Rencana perubahan yang ditulis lebih dulu supaya bisa dinilai sebelum ada kode. Semuanya
+berangkat dari [`../relation-evaluation.md`](../relation-evaluation.md).
 
-| # | Dokumen | Isi | Menutup temuan |
-|---|---|---|---|
-| 01 | [`01-relation.md`](01-relation.md) | Relation berbasis closure (`Relate`), resolve batch, randId dipertahankan | #1, #2, #6, #7 |
-| 02 | [`02-set-if-absent.md`](02-set-if-absent.md) | `AddItem` memperbarui TTL item existing lewat `SetIfAbsent` | — (temuan baru) |
-| 03 | [`03-remove-purge.md`](03-remove-purge.md) | `RemoveItem` dan `Purge` berhenti menghapus key `Base` | #3 |
+**Ketiganya sudah diimplementasi** di branch `redifu-simplified`, beserta 18 test
+`miniredis` di `redifu_test.go`. Dokumen-dokumen ini sekarang berfungsi sebagai panduan
+pemakaian dan catatan alasan.
+
+| # | Dokumen | Isi | Menutup temuan | Status |
+|---|---|---|---|---|
+| 01 | [`01-relation.md`](01-relation.md) | Relation berbasis closure (`Relate`), resolve batch, randId dipertahankan | #1, #2, #6, #7 | selesai |
+| 02 | [`02-set-if-absent.md`](02-set-if-absent.md) | `AddItem` memperbarui TTL item existing lewat `SetIfAbsent` | — (temuan baru) | selesai |
+| 03 | [`03-remove-purge.md`](03-remove-purge.md) | `RemoveItem` dan `Purge` berhenti menghapus key `Base` | #3 | selesai |
 
 ## Dua aturan yang menyatukannya
 
@@ -27,7 +30,7 @@ menegakkannya, dan dengan itu `RemoveItem`, `Purge`, dan `Base.Del` masing-masin
 menjawab satu pertanyaan yang berbeda: *masih anggota?*, *cache-nya masih dipercaya?*,
 *entity-nya masih ada?*
 
-## Urutan pengerjaan
+## Urutan pengerjaan (sudah dijalankan)
 
 1. **02** lebih dulu — kecil, terlokalisasi, dan menjadi prasyarat bagi argumen TTL di
    01 §9.
