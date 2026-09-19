@@ -2,7 +2,6 @@ package redifu
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/21strive/item"
@@ -27,7 +26,7 @@ type Sorted[T item.Blueprint] struct {
 	baseClient       *Base[T]
 	sortedSetClient  *SortedSet[T]
 	sortingReference string
-	relation         map[string]Relation
+	relations        []Relation[T]
 	timeToLive       time.Duration
 }
 
@@ -47,15 +46,12 @@ func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], s
 	srtd.timeToLive = timeToLive
 }
 
-func (cr *Sorted[T]) AddRelation(identifier string, relationBase Relation) {
-	if cr.relation == nil {
-		cr.relation = make(map[string]Relation)
-	}
-	cr.relation[identifier] = relationBase
+func (cr *Sorted[T]) AddRelation(relations ...Relation[T]) {
+	cr.relations = append(cr.relations, relations...)
 }
 
-func (cr *Sorted[T]) GetRelation() map[string]Relation {
-	return cr.relation
+func (cr *Sorted[T]) GetRelations() []Relation[T] {
+	return cr.relations
 }
 
 func (srtd *Sorted[T]) SetSortingReference(sortingReference string) {
@@ -78,22 +74,17 @@ func (srtd *Sorted[T]) WithPipeline(pipe redis.Pipeliner) *SortedWithPipeline[T]
 }
 
 func (srtd *Sorted[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
-	_, errGet := srtd.baseClient.Get(ctx, item.GetRandId())
-	if errGet != nil && !errors.Is(errGet, redis.Nil) {
-		return errGet
-	}
-
 	var selfPipe bool
 	if pipe == nil {
 		pipe = srtd.client.Pipeline()
 		selfPipe = true
 	}
 
-	if errors.Is(errGet, redis.Nil) {
-		errSet := srtd.baseClient.WithPipeline(pipe).Set(ctx, item)
-		if errSet != nil {
-			return errSet
-		}
+	// Writes the item only if Base does not hold it yet, but always refreshes its TTL —
+	// an index must never outlive the items it points at.
+	errSet := srtd.baseClient.WithPipeline(pipe).SetIfAbsent(ctx, item)
+	if errSet != nil {
+		return errSet
 	}
 
 	errIngest := srtd.IngestItem(ctx, pipe, item, false, keyParams...)
@@ -148,11 +139,8 @@ func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 		pipe = srtd.client.Pipeline()
 	}
 
-	errDelBase := srtd.baseClient.WithPipeline(pipe).Del(ctx, item)
-	if errDelBase != nil {
-		return errDelBase
-	}
-
+	// Only the index is touched. The item stays in Base, because it may well be a member
+	// of other collections; deleting the entity itself is Base.Del's job.
 	errDel := srtd.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...)
 	if errDel != nil {
 		return errDel
@@ -232,20 +220,25 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 	}
 }
 
-func (srtd *Sorted[T]) Remove() *sortedRemoveBuilder[T] {
-	return &sortedRemoveBuilder[T]{
-		srtd:      srtd,
-		keyParams: nil,
-		purge:     false,
-	}
-}
+// Purge invalidates the collection: the sorted set and its state marker are dropped so
+// the next fetch seeds it again from the database. Item keys are left alone.
+func (srtd *Sorted[T]) Purge(ctx context.Context, keyParams ...string) error {
+	pipe := srtd.client.Pipeline()
 
-func (srtd *Sorted[T]) Purge() *sortedRemoveBuilder[T] {
-	return &sortedRemoveBuilder[T]{
-		srtd:      srtd,
-		keyParams: nil,
-		purge:     true,
+	err := srtd.sortedSetClient.Delete(ctx, pipe, keyParams...)
+	if err != nil {
+		return err
 	}
+
+	// Without this the collection stays flagged as confirmed-empty and RequiresSeeding
+	// keeps returning false, so a purge would silently kill it instead of rebuilding it.
+	errHasData := srtd.HasData(ctx, pipe, keyParams...)
+	if errHasData != nil {
+		return errHasData
+	}
+
+	_, errPipe := pipe.Exec(ctx)
+	return errPipe
 }
 
 type sortedFetchBuilder[T item.Blueprint] struct {
@@ -285,7 +278,7 @@ func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 			s.direction,
 			s.processor,
 			s.processorArgs,
-			s.sorted.relation,
+			s.sorted.relations,
 			0, -1, false, s.keyParams...)
 	} else {
 		return s.sorted.sortedSetClient.Fetch(
@@ -294,45 +287,8 @@ func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 			s.direction,
 			s.processor,
 			s.processorArgs,
-			s.sorted.relation,
+			s.sorted.relations,
 			s.lowerbound,
 			s.upperbound, true, s.keyParams...)
 	}
-}
-
-type sortedRemoveBuilder[T item.Blueprint] struct {
-	srtd      *Sorted[T]
-	keyParams []string
-	purge     bool
-}
-
-func (s *sortedRemoveBuilder[T]) WithParams(params ...string) *sortedRemoveBuilder[T] {
-	s.keyParams = params
-	return s
-}
-
-func (s *sortedRemoveBuilder[T]) Exec(ctx context.Context) error {
-	pipe := s.srtd.client.Pipeline()
-
-	if s.purge {
-		fetchedItems, err := s.srtd.Fetch(Ascending).WithParams(s.keyParams...).Exec(ctx)
-		if err != nil {
-			return err
-		}
-
-		for _, fetchedItem := range fetchedItems {
-			errDelItem := s.srtd.baseClient.WithPipeline(pipe).Del(ctx, fetchedItem)
-			if errDelItem != nil {
-				return errDelItem
-			}
-		}
-	}
-
-	err := s.srtd.sortedSetClient.Delete(ctx, pipe, s.keyParams...)
-	if err != nil {
-		return err
-	}
-
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
 }

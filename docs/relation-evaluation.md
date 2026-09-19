@@ -4,6 +4,9 @@
 > Commit: `742715e`
 > Cakupan: seluruh package `redifu`, dengan penekanan pada mekanisme Relation dan
 > sejauh mana implementasi saat ini memenuhi tujuan singletonisasi cache.
+>
+> Rencana perbaikan yang lahir dari temuan #1, #2, #6, dan #7 di bawah ditulis sebagai
+> panduan pemakaian di [`plan-2026-08-30/01-relation.md`](plan-2026-08-30/01-relation.md).
 
 ---
 

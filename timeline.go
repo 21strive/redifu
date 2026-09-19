@@ -54,7 +54,7 @@ type Timeline[T item.Blueprint] struct {
 	itemPerPage      int64
 	direction        string
 	sortingReference string
-	relation         map[string]Relation
+	relations        []Relation[T]
 	timeToLive       time.Duration
 }
 
@@ -66,9 +66,7 @@ func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Bas
 	sortedSetClient := &SortedSet[T]{}
 	sortedSetClient.Init(client, keyFormat)
 
-	timeline := &Timeline[T]{
-		relation: make(map[string]Relation), // Initialize the map
-	}
+	timeline := &Timeline[T]{}
 	timeline.Init(client, baseClient, sortedSetClient, itemPerPage, direction, timeToLive)
 	return timeline
 }
@@ -82,15 +80,12 @@ func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], s
 	cr.timeToLive = timeToLive
 }
 
-func (cr *Timeline[T]) AddRelation(identifier string, relationBase Relation) {
-	if cr.relation == nil {
-		cr.relation = make(map[string]Relation)
-	}
-	cr.relation[identifier] = relationBase
+func (cr *Timeline[T]) AddRelation(relations ...Relation[T]) {
+	cr.relations = append(cr.relations, relations...)
 }
 
-func (cr *Timeline[T]) GetRelation() map[string]Relation {
-	return cr.relation
+func (cr *Timeline[T]) GetRelations() []Relation[T] {
+	return cr.relations
 }
 
 func (cr *Timeline[T]) SetSortingReference(sortingReference string) {
@@ -117,22 +112,17 @@ func (cr *Timeline[T]) WithPipeline(pipe redis.Pipeliner) *TimelineWithPipeline[
 }
 
 func (cr *Timeline[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
-	_, errGet := cr.baseClient.Get(ctx, item.GetRandId())
-	if errGet != nil && errGet != redis.Nil {
-		return errGet
-	}
-
 	var selfPipe bool
 	if pipe == nil {
 		pipe = cr.client.Pipeline()
 		selfPipe = true
 	}
 
-	if errGet == redis.Nil {
-		errSet := cr.baseClient.WithPipeline(pipe).Set(ctx, item)
-		if errSet != nil {
-			return errSet
-		}
+	// Writes the item only if Base does not hold it yet, but always refreshes its TTL —
+	// an index must never outlive the items it points at.
+	errSet := cr.baseClient.WithPipeline(pipe).SetIfAbsent(ctx, item)
+	if errSet != nil {
+		return errSet
 	}
 
 	errIngest := cr.IngestItem(ctx, pipe, item, false, keyParams...)
@@ -229,11 +219,8 @@ func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 		selfPipe = true
 	}
 
-	errDelBase := cr.baseClient.WithPipeline(pipe).Del(ctx, item)
-	if errDelBase != nil {
-		return errDelBase
-	}
-
+	// Only the index is touched. The item stays in Base, because it may well be a member
+	// of other collections; deleting the entity itself is Base.Del's job.
 	err := cr.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...)
 	if err != nil {
 		return err
@@ -403,20 +390,22 @@ func (cr *Timeline[T]) FetchAll() *timelineFetchBuilder[T] {
 	}
 }
 
-func (cr *Timeline[T]) Remove() *timelineRemovalBuilder[T] {
-	return &timelineRemovalBuilder[T]{
-		timeline: cr,
-		params:   nil,
-		purge:    false,
-	}
-}
+// Purge invalidates the collection: the sorted set and all three state markers are
+// dropped so the next fetch seeds it again from the database. Item keys are left alone.
+func (cr *Timeline[T]) Purge(ctx context.Context, keyParams ...string) error {
+	pipe := cr.client.Pipeline()
 
-func (cr *Timeline[T]) Purge() *timelineRemovalBuilder[T] {
-	return &timelineRemovalBuilder[T]{
-		timeline: cr,
-		params:   nil,
-		purge:    true,
+	err := cr.sortedSetClient.Delete(ctx, pipe, keyParams...)
+	if err != nil {
+		return err
 	}
+
+	cr.UnmarkFirstPage(ctx, pipe, keyParams...)
+	cr.UnmarkLastPage(ctx, pipe, keyParams...)
+	cr.HasData(ctx, pipe, keyParams...)
+
+	_, errPipe := pipe.Exec(ctx)
+	return errPipe
 }
 
 type timelineFetchBuilder[T item.Blueprint] struct {
@@ -493,7 +482,7 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 		b.timeline.direction,
 		b.processor,
 		b.processorArgs,
-		b.timeline.relation,
+		b.timeline.relations,
 		start,
 		stop,
 		false,
@@ -564,42 +553,4 @@ func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, key
 	} else {
 		return false, nil
 	}
-}
-
-type timelineRemovalBuilder[T item.Blueprint] struct {
-	timeline *Timeline[T]
-	params   []string
-	purge    bool
-}
-
-func (t *timelineRemovalBuilder[T]) WithParams(params ...string) *timelineRemovalBuilder[T] {
-	t.params = params
-	return t
-}
-
-func (t *timelineRemovalBuilder[T]) Exec(ctx context.Context) error {
-	pipe := t.timeline.client.Pipeline()
-
-	if t.purge {
-		fetchOutput := t.timeline.FetchAll().WithParams(t.params...).Exec(ctx)
-		if fetchOutput.Error() != nil {
-			return fetchOutput.Error()
-		}
-
-		for _, item := range fetchOutput.Items() {
-			t.timeline.baseClient.WithPipeline(pipe).Del(ctx, item)
-		}
-	}
-
-	err := t.timeline.sortedSetClient.Delete(ctx, pipe, t.params...)
-	if err != nil {
-		return err
-	}
-
-	t.timeline.UnmarkFirstPage(ctx, pipe, t.params...)
-	t.timeline.UnmarkLastPage(ctx, pipe, t.params...)
-	t.timeline.HasData(ctx, pipe, t.params...)
-
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
 }
