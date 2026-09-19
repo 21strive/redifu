@@ -862,8 +862,10 @@ output := PostTimeline.
 
 ## Seeding a related entity in the same pass
 
-When your seeding query JOINs the related entity, warm its `Base` from the same row and the
-same pipeline. Subsequent fetches then resolve the Relation from Redis without touching the DB.
+A related entity is a full entity. It has its own `Base`, it is updated through its own `Base`,
+and it is stored exactly once no matter how many parents point at it. When your seeding query
+JOINs it, you are warming *its* key from the same row and the same pipeline — not embedding it
+in the parent. Subsequent fetches then resolve the Relation from Redis without touching the DB.
 
 ```go
 rows, err := db.QueryContext(ctx, `
@@ -879,6 +881,7 @@ if err != nil {
 defer rows.Close()
 
 pipe := redisClient.Pipeline()
+seenAuthor := map[string]bool{}
 
 for rows.Next() {
     p := &Post{}
@@ -890,20 +893,63 @@ for rows.Next() {
         return err
     }
 
+    // The post is fully selected, so write it outright.
     PostBase.WithPipeline(pipe).Set(ctx, p)
     PostTimeline.IngestItem(ctx, pipe, p, true, userRandId)
 
-    // warm the related entity's own Base in the same pipeline
-    account.AccountBase.WithPipeline(pipe).Set(ctx, author)
+    // The author is only partially selected — warm its own Base with SetIfAbsent.
+    if !seenAuthor[author.RandId] {
+        seenAuthor[author.RandId] = true
+        account.AccountBase.WithPipeline(pipe).SetIfAbsent(ctx, author)
+    }
 }
 ```
 
 Scan the JOINed columns into the related entity and write it to **its own** `Base`; scan only
 `AuthorRandId` into the post. Never assign `p.Author` here — the Relation does that on fetch.
 
-The same JOINed author appears on many rows, so this re-`SET`s `account:a7` repeatedly. That is
-harmless — same key, same value — and it is one pipeline either way. Skip the duplicates with a
-local `map[string]bool` if the payload is large.
+### `SetIfAbsent` for the joined entity, not `Set`
+
+This is the part that bites. A join written for a feed selects the columns that feed needs —
+`a.randid, a.name` — not every column of `accounts`. Writing that row with `Set` replaces the
+complete `Account` already in Redis with the two columns this query happened to select, and
+`account.Bio`, `account.AvatarURL` and the rest are gone from every post that points at it.
+
+`SetIfAbsent` writes the key only if nothing is there, and **refreshes its TTL either way**. So a
+join warms a cold key, keeps a warm one alive, and can never truncate a complete entity.
+
+Use `Set` for the joined entity only when the JOIN selects every column of it. When in doubt,
+`SetIfAbsent` — the worst case is a cache miss that your own loader fills.
+
+The same author appears on many rows, so deduplicate with a local `map[string]bool`. It is not
+required for correctness (same key, same value) but it keeps the pipeline small.
+
+### The joined entity's own relations
+
+Relations nest, so `post.Author.Organisation` resolves too — but only if `organisation:<id>` is
+warm. A join two levels deep warms it in the same pass:
+
+```sql
+FROM posts p
+JOIN accounts a      ON a.randid = p.author_randid
+JOIN organisations o ON o.randid = a.organisation_randid
+```
+
+If you do not join that far, `post.Author.Organisation` comes back `nil` until something else
+warms that key. Guard for it, the same as any other relation.
+
+### Which `Base` gets the `AddRelation`
+
+The one that owns the pointer field.
+
+```go
+AccountBase.AddRelation(organisationRelation) // Account.OrganisationRandId
+PostBase.AddRelation(authorRelation)          // Post.AuthorRandId
+```
+
+Declared this way, updating an organisation is one `OrganisationBase.Set` and every post by
+every account in it reflects the change — no feed purged, no page reseeded, and a single
+`PostBase.Get` resolves the same chain as a feed fetch does.
 
 ---
 
