@@ -225,8 +225,44 @@ You no longer import go-redis to tell "missing" from "broken".
 
 ## 13. Removed
 
-`sqlitem.go` (`SQLItemBlueprint`, `Record`, `InitRecord`) — leftovers from the SQL layer
-that was removed earlier. Use `item.Foundation` directly.
+`sqlitem.go` (`SQLItemBlueprint`) — a leftover from the SQL layer that was removed
+earlier. Nothing replaces it: `redifu.Blueprint` is the only contract an entity has to
+meet.
+
+## 14. Identity is redifu's own again
+
+`redifu.Record` and `redifu.InitRecord` are back, and this time they are not tied to the
+SQL layer. redifu no longer depends on `github.com/21strive/item` at all — it defines
+`Blueprint` itself, and `Record` is the identity entities embed.
+
+```go
+type Post struct {
+    *redifu.Record         // was: *item.Foundation
+    Title string `json:"title"`
+}
+
+post := &Post{}            // was: &Post{Foundation: &item.Foundation{}}
+redifu.InitRecord(post)    // was: item.InitItem(post)
+```
+
+The shape is unchanged — a pointer embed, allocated by `InitRecord` — so a migration is
+a rename and nothing else.
+
+**Nothing forces you to migrate.** `Blueprint` is an ordinary interface, so it is
+satisfied structurally: an entity that still embeds `*item.Foundation` keeps compiling
+and keeps working, and the stored JSON is identical either way — `Record` inlines under
+the same keys. Migrate an entity when you touch it, not before.
+
+Two things do change if you adopt `Record`:
+
+- **`InitRecord` does not allocate named pointer fields.** `item.InitItem` walked every
+  field and allocated each nil pointer, which handed a relation field a non-nil empty
+  entity before any fetch had run. `InitRecord` allocates embedded pointers only, so a
+  relation field stays nil until a fetch resolves it — which is what the rest of redifu
+  documents and what `Relate`'s transient probe assumes.
+- **`RandId` draws from `crypto/rand`.** Same 16 characters, same alphabet, same wire
+  format; a randId is a public handle that ends up in URLs, so it is no longer drawn
+  from the `math/rand` global source.
 
 ---
 

@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
 // Base is the single source of truth for an entity: one Redis key per item, written
 // once and read by every index and every relation that points at it.
-type Base[T item.Blueprint] struct {
+type Base[T Blueprint] struct {
 	client        redis.UniversalClient
 	keys          *keyBuilder
 	timeToLive    time.Duration
@@ -22,7 +21,7 @@ type Base[T item.Blueprint] struct {
 	touchOnRead   bool
 }
 
-type BaseWithPipeline[T item.Blueprint] struct {
+type BaseWithPipeline[T Blueprint] struct {
 	baseClient *Base[T]
 	pipe       redis.Pipeliner
 }
@@ -46,7 +45,7 @@ func (bw *BaseWithPipeline[T]) MarkAsMissing(ctx context.Context, keyParams ...s
 // NewBase builds the item store. itemKeyFormat must take exactly one %s — an item is
 // addressed by exactly one randId, and that is what lets any relation anywhere point
 // at it with nothing but that id.
-func NewBase[T item.Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) (*Base[T], error) {
+func NewBase[T Blueprint](client redis.UniversalClient, itemKeyFormat string, timeToLive time.Duration) (*Base[T], error) {
 	base := &Base[T]{}
 	if err := base.Init(client, itemKeyFormat, timeToLive); err != nil {
 		return nil, err

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -27,7 +26,7 @@ type Relation[P any] interface {
 	stage(ctx context.Context, pipe redis.Pipeliner, items []P, depth int) (func() error, error)
 }
 
-type relation[P any, R item.Blueprint] struct {
+type relation[P any, R Blueprint] struct {
 	base      *Base[R]
 	getRandId func(P) string
 	setItem   func(P, R)
@@ -102,7 +101,7 @@ func (rl *relation[P, R]) stage(ctx context.Context, pipe redis.Pipeliner, items
 // refuses the relation if it is missing, because an untagged field bakes a copy of the
 // related entity into the parent's own key the first time the parent is written back,
 // and that breaks the singleton permanently and silently.
-func Relate[P any, R item.Blueprint](
+func Relate[P any, R Blueprint](
 	base *Base[R],
 	getRandId func(P) string,
 	setItem func(P, R),
@@ -139,7 +138,7 @@ func Relate[P any, R item.Blueprint](
 // setter, and marshals it again: if the field is excluded from JSON the two renderings
 // are identical, and if it is not, the related entity has just shown up in the parent's
 // stored form, which is exactly the corruption this refuses to allow.
-func verifyRelationIsTransient[P any, R item.Blueprint](setItem func(P, R)) error {
+func verifyRelationIsTransient[P any, R Blueprint](setItem func(P, R)) error {
 	var parent P
 	parentType := reflect.TypeOf(&parent).Elem().Elem()
 	if parentType.Kind() != reflect.Struct {
@@ -187,7 +186,7 @@ func verifyRelationIsTransient[P any, R item.Blueprint](setItem func(P, R)) erro
 // probeRelationJSON renders the parent before and after the setter runs. It reports
 // probed = false rather than an error if anything about the probe fails, since a probe
 // that could not run proves nothing about the relation.
-func probeRelationJSON[P any, R item.Blueprint](parent P, related R, setItem func(P, R)) (before []byte, after []byte, probed bool) {
+func probeRelationJSON[P any, R Blueprint](parent P, related R, setItem func(P, R)) (before []byte, after []byte, probed bool) {
 	defer func() {
 		if recover() != nil {
 			probed = false
@@ -208,7 +207,8 @@ func probeRelationJSON[P any, R item.Blueprint](parent P, related R, setItem fun
 	return before, after, true
 }
 
-// allocateEmbedded fills in nil embedded pointers such as *item.Foundation, so that a
+// allocateEmbedded fills in nil embedded pointers, for an entity that embeds its
+// identity as a pointer rather than embedding Record by value, so that a
 // probe behaves like an item a consumer would hand to redifu. Named fields are left
 // alone on purpose: the relation field is one of them, and it has to start out empty
 // for the before/after comparison to mean anything.

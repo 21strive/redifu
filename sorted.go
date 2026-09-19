@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,7 +21,7 @@ const (
 // A relation registered in both places is kept once. Registering it twice is the
 // natural mistake to make while moving relations onto Base, and without this it would
 // silently double every read that relation performs.
-func combineRelations[T item.Blueprint](baseClient *Base[T], extra []Relation[T]) []Relation[T] {
+func combineRelations[T Blueprint](baseClient *Base[T], extra []Relation[T]) []Relation[T] {
 	if len(extra) == 0 {
 		return baseClient.relations
 	}
@@ -51,7 +50,7 @@ func combineRelations[T item.Blueprint](baseClient *Base[T], extra []Relation[T]
 	return combined
 }
 
-type SortedWithPipeline[T item.Blueprint] struct {
+type SortedWithPipeline[T Blueprint] struct {
 	sorted   *Sorted[T]
 	pipeline redis.Pipeliner
 }
@@ -68,7 +67,7 @@ func (sw *SortedWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyPara
 	return sw.sorted.removeItem(ctx, sw.pipeline, item, keyParams...)
 }
 
-type Sorted[T item.Blueprint] struct {
+type Sorted[T Blueprint] struct {
 	client          redis.UniversalClient
 	baseClient      *Base[T]
 	sortedSetClient *SortedSet[T]
@@ -77,7 +76,7 @@ type Sorted[T item.Blueprint] struct {
 	timeToLive      time.Duration
 }
 
-func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) (*Sorted[T], error) {
+func NewSorted[T Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) (*Sorted[T], error) {
 	sortedSetClient := &SortedSet[T]{}
 	if err := sortedSetClient.Init(client, keyFormat); err != nil {
 		return nil, err
@@ -348,7 +347,7 @@ func (srtd *Sorted[T]) Purge(ctx context.Context, keyParams ...string) error {
 	return errPipe
 }
 
-type sortedFetchBuilder[T item.Blueprint] struct {
+type sortedFetchBuilder[T Blueprint] struct {
 	direction     string
 	sorted        *Sorted[T]
 	keyParams     []string

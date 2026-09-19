@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
-type SortedSet[T item.Blueprint] struct {
+type SortedSet[T Blueprint] struct {
 	client redis.UniversalClient
 	keys   *keyBuilder
 	// selfHeal removes index members whose item key no longer exists. Without it an
@@ -18,7 +17,7 @@ type SortedSet[T item.Blueprint] struct {
 	selfHeal bool
 }
 
-func NewSortedSet[T item.Blueprint](client redis.UniversalClient, sortedSetKeyFormat string) (*SortedSet[T], error) {
+func NewSortedSet[T Blueprint](client redis.UniversalClient, sortedSetKeyFormat string) (*SortedSet[T], error) {
 	sorted := &SortedSet[T]{}
 	if err := sorted.Init(client, sortedSetKeyFormat); err != nil {
 		return nil, err

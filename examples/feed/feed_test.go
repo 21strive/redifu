@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/21strive/item"
+	"github.com/21strive/redifu"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
@@ -56,11 +56,11 @@ func fixture(t *testing.T, store *Store) (*Organisation, *Account, []*Post) {
 	ctx := context.Background()
 
 	organisation := newOrganisation()
-	item.InitItem(organisation)
+	redifu.InitRecord(organisation)
 	organisation.Name, organisation.Plan = "Acme", "pro"
 
 	account := newAccount()
-	item.InitItem(account)
+	redifu.InitRecord(account)
 	account.Name, account.Handle, account.Bio = "Ada", "@ada", "Writes about compilers."
 	account.OrganisationRandId = organisation.GetRandId()
 

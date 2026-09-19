@@ -6,11 +6,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
-type PageWithPipeline[T item.Blueprint] struct {
+type PageWithPipeline[T Blueprint] struct {
 	page *Page[T]
 	pipe redis.Pipeliner
 }
@@ -24,7 +23,7 @@ func (pw *PageWithPipeline[T]) RemoveItem(ctx context.Context, item T, page int6
 	return pw.page.sorted.removeItem(ctx, pw.pipe, item, pw.page.pageParams(page, keyParams)...)
 }
 
-type Page[T item.Blueprint] struct {
+type Page[T Blueprint] struct {
 	client        redis.UniversalClient
 	pageIndexKeys *keyBuilder
 	sorted        *Sorted[T]
@@ -32,7 +31,7 @@ type Page[T item.Blueprint] struct {
 	itemPerPage   int64
 }
 
-func NewPage[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) (*Page[T], error) {
+func NewPage[T Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) (*Page[T], error) {
 	keys, err := newKeyBuilder(keyFormat)
 	if err != nil {
 		return nil, err
@@ -193,7 +192,7 @@ func (p *Page[T]) Purge(ctx context.Context, keyParams ...string) error {
 	return p.client.Del(ctx, key).Err()
 }
 
-type pageFetchBuilder[T item.Blueprint] struct {
+type pageFetchBuilder[T Blueprint] struct {
 	page          *Page[T]
 	pageNumber    int64
 	params        []string

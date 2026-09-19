@@ -27,6 +27,53 @@ SortedSet[T]          low-level: ZAdd, ZRange, ZRem, ZCard — not used directly
 
 ---
 
+## Entity identity — `Record`
+
+`Blueprint` is redifu's own interface: the methods redifu needs to index an entity
+(`GetRandId`) and score it (`GetCreatedAt`). `Record` is the struct that implements it,
+and every entity embeds it **as a pointer**:
+
+```go
+type Post struct {
+    *redifu.Record
+    Title string `json:"title"`
+}
+
+post := &Post{}          // Record is nil here
+redifu.InitRecord(post)  // allocates it and mints the identity
+```
+
+**Every newly created entity goes through `InitRecord`.** That is the house rule, and
+the pointer embed is what makes forgetting it visible: an entity with a nil `Record`
+panics on its first method call instead of drifting on with a blank identity.
+
+The one construction that does not mint is an entity about to be filled from a database
+row — it already carries a randId, so it allocates without minting:
+
+```go
+func newPost() *Post { return &Post{Record: &redifu.Record{}} }
+```
+
+A fetch out of `Base` needs neither: unmarshalling allocates the embedded pointer.
+
+redifu owns this contract; it does not depend on `github.com/21strive/item`. Because
+`Blueprint` is an ordinary interface it is satisfied structurally, so an entity carrying
+those methods some other way — an older one embedding `*item.Foundation`, or one
+embedding its identity by value — still works. `record_test.go` pins that down; do not
+turn `Blueprint` into a constraint that only `Record` can meet.
+
+Two identifiers per entity, on purpose: `UUID` is private and `SecureUUID()` clears it
+before an entity goes out over an API; `RandId` is the public handle, drawn from
+`crypto/rand`, and it is the only thing a sorted set stores.
+
+`InitRecord` allocates the embedded `Record` and mints identity for a **new** entity.
+An entity being filled from a database row already has a randId — minting a fresh one
+orphans every index pointing at the old one. It allocates *embedded* pointers only: a
+named pointer field is left nil, because that is what a relation field must be until a
+fetch resolves it.
+
+---
+
 ## When to use which structure
 
 | Use case | Structure |

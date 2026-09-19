@@ -8,11 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
-type TimeSeriesWithPipeline[T item.Blueprint] struct {
+type TimeSeriesWithPipeline[T Blueprint] struct {
 	timeSeries *TimeSeries[T]
 	pipe       redis.Pipeliner
 }
@@ -26,14 +25,14 @@ func (t *TimeSeriesWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyP
 	return t.timeSeries.sorted.WithPipeline(t.pipe).RemoveItem(ctx, item, keyParams...)
 }
 
-type TimeSeries[T item.Blueprint] struct {
+type TimeSeries[T Blueprint] struct {
 	redis      redis.UniversalClient
 	segments   *keyBuilder
 	timeToLive time.Duration
 	sorted     *Sorted[T]
 }
 
-func NewTimeSeries[T item.Blueprint](
+func NewTimeSeries[T Blueprint](
 	client redis.UniversalClient,
 	baseClient *Base[T],
 	keyFormat string,
@@ -363,7 +362,7 @@ func (s *TimeSeries[T]) CountSegments(ctx context.Context, keyParams ...string) 
 	return s.redis.HLen(ctx, segmentStoreKey).Result()
 }
 
-type fetchTimeSeriesBuilder[T item.Blueprint] struct {
+type fetchTimeSeriesBuilder[T Blueprint] struct {
 	timeSeries    *TimeSeries[T]
 	lowerbound    time.Time
 	upperbound    time.Time

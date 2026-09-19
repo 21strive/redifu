@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -20,13 +19,13 @@ import (
 // ---------------------------------------------------------------------------
 
 type Publisher struct {
-	*item.Foundation
+	*Record
 	Name string `json:"name"`
 	Tier string `json:"tier"`
 }
 
 type Writer struct {
-	*item.Foundation
+	*Record
 	Name            string     `json:"name"`
 	Bio             string     `json:"bio"`
 	PublisherRandId string     `json:"publisherRandId"`
@@ -34,7 +33,7 @@ type Writer struct {
 }
 
 type Article struct {
-	*item.Foundation
+	*Record
 	Title        string  `json:"title"`
 	Body         string  `json:"body"`
 	WriterRandId string  `json:"writerRandId"`
@@ -43,16 +42,16 @@ type Article struct {
 
 func newPublisher(t *testing.T, name, tier string) *Publisher {
 	t.Helper()
-	publisher := &Publisher{Foundation: &item.Foundation{}}
-	item.InitItem(publisher)
+	publisher := &Publisher{}
+	InitRecord(publisher)
 	publisher.Name, publisher.Tier = name, tier
 	return publisher
 }
 
 func newWriter(t *testing.T, name, bio string) *Writer {
 	t.Helper()
-	writer := &Writer{Foundation: &item.Foundation{}}
-	item.InitItem(writer)
+	writer := &Writer{}
+	InitRecord(writer)
 	writer.Name, writer.Bio = name, bio
 	writer.Publisher = nil
 	return writer
@@ -60,8 +59,8 @@ func newWriter(t *testing.T, name, bio string) *Writer {
 
 func newArticle(t *testing.T, title string, createdAt time.Time) *Article {
 	t.Helper()
-	article := &Article{Foundation: &item.Foundation{}}
-	item.InitItem(article)
+	article := &Article{}
+	InitRecord(article)
 	article.Title = title
 	article.SetCreatedAt(createdAt)
 	article.Writer = nil

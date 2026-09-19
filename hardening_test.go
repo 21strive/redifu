@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/21strive/item"
 )
 
 // ---------------------------------------------------------------------------
@@ -16,19 +14,19 @@ import (
 // ---------------------------------------------------------------------------
 
 type Org struct {
-	*item.Foundation
+	*Record
 	Name string `json:"name"`
 }
 
 type Member struct {
-	*item.Foundation
+	*Record
 	Name      string `json:"name"`
 	OrgRandId string `json:"orgRandId"`
 	Org       *Org   `json:"-"`
 }
 
 type Doc struct {
-	*item.Foundation
+	*Record
 	Title       string  `json:"title"`
 	OwnerRandId string  `json:"ownerRandId"`
 	Owner       *Member `json:"-"`
@@ -39,14 +37,14 @@ type Doc struct {
 // from JSON, so writing a fetched post back to Base would bake a copy of the account
 // into the post's own key.
 type LeakyPost struct {
-	*item.Foundation
+	*Record
 	AuthorRandId string   `json:"authorRandId"`
 	Author       *Account `json:"author"`
 }
 
 // Node relates to itself, which is legitimate and must terminate.
 type Node struct {
-	*item.Foundation
+	*Record
 	Name         string `json:"name"`
 	ParentRandId string `json:"parentRandId"`
 	Parent       *Node  `json:"-"`
@@ -54,16 +52,16 @@ type Node struct {
 
 func newOrg(t *testing.T, name string) *Org {
 	t.Helper()
-	org := &Org{Foundation: &item.Foundation{}}
-	item.InitItem(org)
+	org := &Org{}
+	InitRecord(org)
 	org.Name = name
 	return org
 }
 
 func newMember(t *testing.T, name string) *Member {
 	t.Helper()
-	member := &Member{Foundation: &item.Foundation{}}
-	item.InitItem(member)
+	member := &Member{}
+	InitRecord(member)
 	member.Name = name
 	member.Org = nil
 	return member
@@ -71,8 +69,8 @@ func newMember(t *testing.T, name string) *Member {
 
 func newDoc(t *testing.T, title string, createdAt time.Time) *Doc {
 	t.Helper()
-	doc := &Doc{Foundation: &item.Foundation{}}
-	item.InitItem(doc)
+	doc := &Doc{}
+	InitRecord(doc)
 	doc.Title = title
 	doc.SetCreatedAt(createdAt)
 	doc.Owner = nil
@@ -81,14 +79,14 @@ func newDoc(t *testing.T, title string, createdAt time.Time) *Doc {
 
 func newNode(t *testing.T, name string) *Node {
 	t.Helper()
-	node := &Node{Foundation: &item.Foundation{}}
-	item.InitItem(node)
+	node := &Node{}
+	InitRecord(node)
 	node.Name = name
 	node.Parent = nil
 	return node
 }
 
-func mustRelation[P any, R item.Blueprint](t *testing.T, base *Base[R], get func(P) string, set func(P, R)) Relation[P] {
+func mustRelation[P any, R Blueprint](t *testing.T, base *Base[R], get func(P) string, set func(P, R)) Relation[P] {
 	t.Helper()
 	relation, err := Relate(base, get, set)
 	if err != nil {
@@ -463,17 +461,17 @@ func TestTouchOnReadCanBeSwitchedOff(t *testing.T) {
 // MinimalTarget renders to very little JSON, so the untagged-field check cannot rely
 // on the related entity being bulky enough to notice.
 type MinimalTarget struct {
-	*item.Foundation
+	*Record
 }
 
 type LeakyHolder struct {
-	*item.Foundation
+	*Record
 	TargetRandId string         `json:"targetRandId"`
 	Target       *MinimalTarget `json:"target"`
 }
 
 type TidyHolder struct {
-	*item.Foundation
+	*Record
 	TargetRandId string         `json:"targetRandId"`
 	Target       *MinimalTarget `json:"-"`
 }

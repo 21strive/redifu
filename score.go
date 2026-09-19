@@ -6,8 +6,6 @@ import (
 	"math"
 	"reflect"
 	"time"
-
-	"github.com/21strive/item"
 )
 
 // maxExactScore is the largest integer a float64 holds without loss. Sorted-set
@@ -29,7 +27,7 @@ const (
 // sortingReference is located once, at SetSortingReference time, so a typo fails at
 // startup instead of on the first write, and reflect.FieldByName does not run on
 // every single add.
-type scorer[T item.Blueprint] struct {
+type scorer[T Blueprint] struct {
 	reference string
 	kind      scoreKind
 	index     []int
@@ -38,7 +36,7 @@ type scorer[T item.Blueprint] struct {
 // newScorer validates that sortingReference names a field of T that redifu can score
 // by. An empty reference (or "createdAt") means GetCreatedAt, which Blueprint
 // guarantees.
-func newScorer[T item.Blueprint](sortingReference string) (*scorer[T], error) {
+func newScorer[T Blueprint](sortingReference string) (*scorer[T], error) {
 	if sortingReference == "" || sortingReference == "createdAt" {
 		return &scorer[T]{reference: sortingReference, kind: scoreFromCreatedAt}, nil
 	}

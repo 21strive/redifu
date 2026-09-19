@@ -36,7 +36,7 @@ Itu keseluruhan janji fitur ini. Semua aturan di bawah ada untuk menjaga janji i
 package post
 
 type Post struct {
-    redifu.Record                            // embed → memenuhi SQLItemBlueprint
+    *redifu.Record                           // embed → memenuhi redifu.Blueprint
     Title   string `json:"title"`
     Content string `json:"content"`
 
@@ -693,7 +693,7 @@ bisa **diratakan penunjuknya**, bukan datanya:
 
 ```go
 type Post struct {
-    redifu.Record
+    *redifu.Record
     AuthorRandId string           `json:"authorRandId"`
     Author       *account.Account `json:"-"`
 

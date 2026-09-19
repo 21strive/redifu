@@ -5,11 +5,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
-type FetchOutput[T item.Blueprint] struct {
+type FetchOutput[T Blueprint] struct {
 	items       []T
 	validLastId string
 	position    string
@@ -57,7 +56,7 @@ func (f FetchOutput[T]) Error() error {
 	return f.error
 }
 
-type TimelineWithPipeline[T item.Blueprint] struct {
+type TimelineWithPipeline[T Blueprint] struct {
 	timeline *Timeline[T]
 	pipeline redis.Pipeliner
 }
@@ -74,7 +73,7 @@ func (t TimelineWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyPara
 	return t.timeline.removeItem(ctx, t.pipeline, item, keyParams...)
 }
 
-type Timeline[T item.Blueprint] struct {
+type Timeline[T Blueprint] struct {
 	client          redis.UniversalClient
 	baseClient      *Base[T]
 	sortedSetClient *SortedSet[T]
@@ -85,7 +84,7 @@ type Timeline[T item.Blueprint] struct {
 	timeToLive      time.Duration
 }
 
-func NewTimeline[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) (*Timeline[T], error) {
+func NewTimeline[T Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, itemPerPage int64, direction string, timeToLive time.Duration) (*Timeline[T], error) {
 	sortedSetClient := &SortedSet[T]{}
 	if err := sortedSetClient.Init(client, keyFormat); err != nil {
 		return nil, err
@@ -395,7 +394,7 @@ func (cr *Timeline[T]) Purge(ctx context.Context, keyParams ...string) error {
 	return errPipe
 }
 
-type timelineFetchBuilder[T item.Blueprint] struct {
+type timelineFetchBuilder[T Blueprint] struct {
 	timeline      *Timeline[T]
 	lastRandIds   []string
 	params        []string

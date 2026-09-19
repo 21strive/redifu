@@ -78,14 +78,21 @@ rule: **Base = 7 days, sorted set = 2 days.**
 
 ### 1. Entity struct
 
-Entities must implement `item.Blueprint` (from `github.com/21strive/item`).
+Entities must implement `redifu.Blueprint`, which embedding `*redifu.Record` does for you.
+`Record` carries the uuid, the randId and the timestamps redifu indexes and scores by.
+
+It is a pointer, so it has to be allocated. **Every entity you create goes through
+`redifu.InitRecord`**, which allocates it and mints the identity. The exception is an
+entity about to be filled from a database row: it already carries a randId, so allocate
+it without minting — `&Post{Record: &redifu.Record{}}`. An entity coming back from a
+fetch needs neither; unmarshalling allocates it.
 
 **Entities are always used as pointer types** — `Base[*Post]`, never `Base[Post]`. A Relation
 writes the related entity into your struct, and that is only possible through a pointer.
 
 ```go
 type Post struct {
-    redifu.Record                              // embed for SQLItemBlueprint
+    *redifu.Record                             // embed → satisfies redifu.Blueprint
     Title        string
     Content      string
 

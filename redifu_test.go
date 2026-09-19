@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/21strive/item"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
@@ -23,12 +22,12 @@ const (
 )
 
 type Account struct {
-	*item.Foundation
+	*Record
 	Name string `json:"name"`
 }
 
 type Post struct {
-	*item.Foundation
+	*Record
 	Title string `json:"title"`
 
 	AuthorRandId string   `json:"authorRandId"`
@@ -47,7 +46,7 @@ type Post struct {
 // returns an error, so tests unwrap it here instead of at every call site.
 // ---------------------------------------------------------------------------
 
-func mustBase[T item.Blueprint](t *testing.T, client redis.UniversalClient, keyFormat string, ttl time.Duration) *Base[T] {
+func mustBase[T Blueprint](t *testing.T, client redis.UniversalClient, keyFormat string, ttl time.Duration) *Base[T] {
 	t.Helper()
 	base, err := NewBase[T](client, keyFormat, ttl)
 	if err != nil {
@@ -56,7 +55,7 @@ func mustBase[T item.Blueprint](t *testing.T, client redis.UniversalClient, keyF
 	return base
 }
 
-func mustTimeline[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, perPage int64, direction string, ttl time.Duration) *Timeline[T] {
+func mustTimeline[T Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, perPage int64, direction string, ttl time.Duration) *Timeline[T] {
 	t.Helper()
 	timeline, err := NewTimeline[T](client, base, keyFormat, perPage, direction, ttl)
 	if err != nil {
@@ -65,7 +64,7 @@ func mustTimeline[T item.Blueprint](t *testing.T, client redis.UniversalClient, 
 	return timeline
 }
 
-func mustSorted[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, ttl time.Duration) *Sorted[T] {
+func mustSorted[T Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, ttl time.Duration) *Sorted[T] {
 	t.Helper()
 	sorted, err := NewSorted[T](client, base, keyFormat, ttl)
 	if err != nil {
@@ -74,7 +73,7 @@ func mustSorted[T item.Blueprint](t *testing.T, client redis.UniversalClient, ba
 	return sorted
 }
 
-func mustPage[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, perPage int64, direction string, ttl time.Duration) *Page[T] {
+func mustPage[T Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, perPage int64, direction string, ttl time.Duration) *Page[T] {
 	t.Helper()
 	page, err := NewPage[T](client, base, keyFormat, perPage, direction, ttl)
 	if err != nil {
@@ -83,7 +82,7 @@ func mustPage[T item.Blueprint](t *testing.T, client redis.UniversalClient, base
 	return page
 }
 
-func mustTimeSeries[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, ttl time.Duration) *TimeSeries[T] {
+func mustTimeSeries[T Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, ttl time.Duration) *TimeSeries[T] {
 	t.Helper()
 	series, err := NewTimeSeries[T](client, base, keyFormat, ttl)
 	if err != nil {
@@ -97,16 +96,16 @@ func indexKey(key string) string { return "{" + key + "}" }
 
 func newAccount(t *testing.T, name string) *Account {
 	t.Helper()
-	account := &Account{Foundation: &item.Foundation{}}
-	item.InitItem(account)
+	account := &Account{}
+	InitRecord(account)
 	account.Name = name
 	return account
 }
 
 func newPost(t *testing.T, title string, createdAt time.Time) *Post {
 	t.Helper()
-	post := &Post{Foundation: &item.Foundation{}}
-	item.InitItem(post)
+	post := &Post{}
+	InitRecord(post)
 	post.Title = title
 	post.SetCreatedAt(createdAt)
 	post.Author = nil
@@ -258,7 +257,7 @@ func TestAddItemDoesNotOverwriteExistingPayload(t *testing.T) {
 	seedTimeline(t, client, base, timeline, "u1", post)
 
 	// A stub carrying only identity and sorting field, as an event payload would.
-	stub := &Post{Foundation: &item.Foundation{}}
+	stub := &Post{Record: &Record{}}
 	stub.RandId = post.GetRandId()
 	stub.SetCreatedAt(post.GetCreatedAt())
 
