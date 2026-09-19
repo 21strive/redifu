@@ -303,6 +303,20 @@ TTL is configurable at initialization.
 
 ---
 
+## Worked example
+
+[`examples/feed/`](examples/feed/) is a complete consumer: three related entities, the wiring,
+a seeder that reads them out of Postgres with one JOIN, and the read and write handlers on top.
+It is part of `go build ./...` and has its own tests, so it cannot drift away from the API.
+
+| File | |
+|---|---|
+| [`entity.go`](examples/feed/entity.go) | the entities and their `randId` / `json:"-"` field pairs |
+| [`store.go`](examples/feed/store.go) | constructors, relations, sorting reference |
+| [`seed.go`](examples/feed/seed.go) | the SQL, the row scan, and the seeding pipeline |
+| [`handler.go`](examples/feed/handler.go) | feed fetch and single-item read |
+| [`write.go`](examples/feed/write.go) | create, fan-out, update, delete |
+
 ## Upgrading
 
 Current release: see [`MIGRATION.md`](MIGRATION.md) — constructors return errors, relations move
