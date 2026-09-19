@@ -43,13 +43,20 @@ This means: update an item once in `Base`, and every collection referencing it i
 Use for get/set of a single item by ID.
 
 ```go
-postBase := redifu.NewBase[Post](redisClient, "post:%s", 7*24*time.Hour)
+postBase, err := redifu.NewBase[*Post](redisClient, "post:%s", 7*24*time.Hour)
+if err != nil {
+    log.Fatal(err) // the key format is validated here
+}
 
 // Set
 postBase.Set(ctx, post)
 
-// Get
+// Get — relations registered on this Base are resolved, and the read extends the TTL
 post, err := postBase.Get(ctx, randId)
+if errors.Is(err, redifu.ErrNotFound) { ... }
+
+// Exists
+present, err := postBase.Exists(ctx, randId)
 
 // Mark as missing (avoid repeated DB hits for non-existent items)
 postBase.MarkAsMissing(ctx, randId)
@@ -166,7 +173,7 @@ Relations prevent data duplication across entities that reference each other.
 
 ```go
 type Post struct {
-    redifu.Record
+    *item.Foundation
     Title        string
     AuthorRandId string           `json:"authorRandId"` // the pointer — this is what Redis stores
     Author       *account.Account `json:"-"`            // filled on fetch, never serialized
@@ -188,12 +195,22 @@ authorRelation, err := redifu.Relate(
 if err != nil {
     log.Fatal(err)
 }
-postTimeline.AddRelation(authorRelation)
+postBase.AddRelation(authorRelation)
 ```
+
+Register the relation on the **`Base`**, not on one index: it then resolves on every read of a
+`Post`, including `Base.Get` for a single item, and on any entity that relates to `Post` in turn.
+`index.AddRelation` still exists for relations that only make sense for that one index.
 
 Both accessors are ordinary functions, so renaming a field breaks the build here rather than
 resolving to nothing at runtime. Relations are resolved per relation for the whole page, so a
-related key shared by twenty items is read once.
+related key shared by twenty items is read once, and they nest: `Post → Author → Org` comes back
+whole, one batched round-trip per level.
+
+`Relate` refuses a relation whose field is not tagged `json:"-"` (`ErrRelationNotTransient`).
+Without the tag, writing a fetched item back to `Base` bakes a copy of the related entity into
+the item's own key and the singleton is broken permanently — so it is checked at startup rather
+than left to a comment.
 
 ---
 
@@ -275,11 +292,22 @@ TTL is configurable at initialization.
 
 ## Limitations
 
-- Sorting only supports fields of type `time.Time`, `*time.Time` or `int64`.
+- Sorting only supports fields of type `time.Time`, `*time.Time` or `int64`. An `int64` beyond
+  2^53 is rejected rather than silently losing precision, so snowflake ids cannot be scores.
 - Seeding is yours to write — redifu has no SQL layer, no query builder and no database dependency.
-- Relations resolve one level only: if a related entity has relations of its own, those stay empty.
+- Relations nest up to `DefaultRelationDepth` (4) levels; beyond that, resolution stops rather
+  than failing, so a self-referential relation terminates.
+- Reading an item extends its TTL with `GETEX`, which needs Redis 6.2. Call
+  `base.SetTouchOnRead(false)` on anything older.
+- Collection keys carry a Redis Cluster hash tag (`{feed:u1}`); item keys do not.
 
 ---
+
+## Upgrading
+
+Current release: see [`MIGRATION.md`](MIGRATION.md) — constructors return errors, relations move
+onto `Base` and nest, `json:"-"` is enforced, ingest is a single atomic script, and pagination no
+longer mistakes an expired item for the end of a feed.
 
 ## Breaking changes on `redifu-simplified`
 

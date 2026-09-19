@@ -2,19 +2,46 @@ package redifu
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/21strive/item"
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	markerBlankPage = ":blankpage"
+	markerFirstPage = ":firstpage"
+	markerLastPage  = ":lastpage"
+)
+
+// combineRelations merges the relations declared on the entity itself with the extra
+// ones declared on one index. The entity's relations travel with it everywhere, which
+// is the point: a Post's author does not depend on which index the Post came through.
+func combineRelations[T item.Blueprint](baseClient *Base[T], extra []Relation[T]) []Relation[T] {
+	if len(extra) == 0 {
+		return baseClient.relations
+	}
+	if len(baseClient.relations) == 0 {
+		return extra
+	}
+	combined := make([]Relation[T], 0, len(baseClient.relations)+len(extra))
+	combined = append(combined, baseClient.relations...)
+	combined = append(combined, extra...)
+	return combined
+}
+
 type SortedWithPipeline[T item.Blueprint] struct {
 	sorted   *Sorted[T]
 	pipeline redis.Pipeliner
 }
 
+// AddItem enqueues the write into the caller's pipeline. Whether the item actually
+// entered the index is only known once the caller executes, so unlike Sorted.AddItem
+// this cannot report ErrNotIngested.
 func (sw *SortedWithPipeline[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
-	return sw.sorted.addItem(ctx, sw.pipeline, item, keyParams...)
+	_, err := sw.sorted.addItem(ctx, sw.pipeline, item, keyParams...)
+	return err
 }
 
 func (sw *SortedWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
@@ -22,28 +49,46 @@ func (sw *SortedWithPipeline[T]) RemoveItem(ctx context.Context, item T, keyPara
 }
 
 type Sorted[T item.Blueprint] struct {
-	client           redis.UniversalClient
-	baseClient       *Base[T]
-	sortedSetClient  *SortedSet[T]
-	sortingReference string
-	relations        []Relation[T]
-	timeToLive       time.Duration
+	client          redis.UniversalClient
+	baseClient      *Base[T]
+	sortedSetClient *SortedSet[T]
+	scorer          *scorer[T]
+	relations       []Relation[T]
+	timeToLive      time.Duration
 }
 
-func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) *Sorted[T] {
+func NewSorted[T item.Blueprint](client redis.UniversalClient, baseClient *Base[T], keyFormat string, timeToLive time.Duration) (*Sorted[T], error) {
 	sortedSetClient := &SortedSet[T]{}
-	sortedSetClient.Init(client, keyFormat)
+	if err := sortedSetClient.Init(client, keyFormat); err != nil {
+		return nil, err
+	}
 
 	sorted := &Sorted[T]{}
-	sorted.Init(client, baseClient, sortedSetClient, timeToLive)
-	return sorted
+	if err := sorted.Init(client, baseClient, sortedSetClient, timeToLive); err != nil {
+		return nil, err
+	}
+	return sorted, nil
 }
 
-func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], timeToLive time.Duration) {
+func (srtd *Sorted[T]) Init(client redis.UniversalClient, baseClient *Base[T], sortedSetClient *SortedSet[T], timeToLive time.Duration) error {
+	if client == nil {
+		return errors.New("redifu: sorted client must not be nil")
+	}
+	if baseClient == nil {
+		return errors.New("redifu: sorted base client must not be nil")
+	}
+
+	defaultScorer, err := newScorer[T]("")
+	if err != nil {
+		return err
+	}
+
 	srtd.client = client
 	srtd.baseClient = baseClient
 	srtd.sortedSetClient = sortedSetClient
+	srtd.scorer = defaultScorer
 	srtd.timeToLive = timeToLive
+	return nil
 }
 
 func (cr *Sorted[T]) AddRelation(relations ...Relation[T]) {
@@ -51,18 +96,30 @@ func (cr *Sorted[T]) AddRelation(relations ...Relation[T]) {
 }
 
 func (cr *Sorted[T]) GetRelations() []Relation[T] {
-	return cr.relations
+	return combineRelations(cr.baseClient, cr.relations)
 }
 
-func (srtd *Sorted[T]) SetSortingReference(sortingReference string) {
-	srtd.sortingReference = sortingReference
+// SetSortingReference chooses the struct field used as the sorted-set score. The field
+// is resolved and type-checked here, once, so a typo fails at startup instead of on
+// the first write, and so reflection does not run on every add.
+func (srtd *Sorted[T]) SetSortingReference(sortingReference string) error {
+	resolved, err := newScorer[T](sortingReference)
+	if err != nil {
+		return err
+	}
+	srtd.scorer = resolved
+	return nil
 }
 
-func (srtd *Sorted[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
-	srtd.sortedSetClient.SetExpiration(ctx, pipe, srtd.timeToLive, keyParams...)
+func (srtd *Sorted[T]) SetSelfHeal(selfHeal bool) {
+	srtd.sortedSetClient.SetSelfHeal(selfHeal)
 }
 
-func (srtd *Sorted[T]) Count(ctx context.Context, keyParams ...string) int64 {
+func (srtd *Sorted[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	return srtd.sortedSetClient.SetExpiration(ctx, pipe, srtd.timeToLive, keyParams...)
+}
+
+func (srtd *Sorted[T]) Count(ctx context.Context, keyParams ...string) (int64, error) {
 	return srtd.sortedSetClient.Count(ctx, keyParams...)
 }
 
@@ -73,7 +130,7 @@ func (srtd *Sorted[T]) WithPipeline(pipe redis.Pipeliner) *SortedWithPipeline[T]
 	}
 }
 
-func (srtd *Sorted[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
+func (srtd *Sorted[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) (bool, error) {
 	var selfPipe bool
 	if pipe == nil {
 		pipe = srtd.client.Pipeline()
@@ -82,54 +139,85 @@ func (srtd *Sorted[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T
 
 	// Writes the item only if Base does not hold it yet, but always refreshes its TTL —
 	// an index must never outlive the items it points at.
-	errSet := srtd.baseClient.WithPipeline(pipe).SetIfAbsent(ctx, item)
-	if errSet != nil {
-		return errSet
+	if err := srtd.baseClient.WithPipeline(pipe).SetIfAbsent(ctx, item); err != nil {
+		return false, err
 	}
 
-	errIngest := srtd.IngestItem(ctx, pipe, item, false, keyParams...)
+	ingested, errIngest := srtd.ingest(ctx, pipe, item, false, keyParams...)
 	if errIngest != nil {
-		return errIngest
+		return false, errIngest
 	}
 
-	if selfPipe {
-		_, errPipe := pipe.Exec(ctx)
-		return errPipe
+	if !selfPipe {
+		return false, nil
 	}
 
-	return nil
+	if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
+		return false, errPipe
+	}
+
+	placed, errPlaced := ingested.Int64()
+	if errPlaced != nil {
+		return false, errPlaced
+	}
+
+	return placed == 1, nil
 }
 
+// AddItem stores the item in Base if it is not there yet, always refreshes its TTL, and
+// places it into the index.
+//
+// It returns ErrNotIngested when the item was stored but deliberately not indexed,
+// which happens when the collection has not been seeded from the database yet. That is
+// an outcome, not a failure — the item will appear once the collection is seeded — but
+// it is reported rather than swallowed, so a caller can tell the two apart.
 func (srtd *Sorted[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
-	return srtd.addItem(ctx, nil, item, keyParams...)
-}
-
-func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, seed bool, keyParams ...string) error {
-	score, err := getItemScore(item, srtd.sortingReference)
+	ingested, err := srtd.addItem(ctx, nil, item, keyParams...)
 	if err != nil {
 		return err
 	}
+	if !ingested {
+		return ErrNotIngested
+	}
+	return nil
+}
 
-	if !seed {
-		isBlankPage, errGet := srtd.IsEmpty(ctx, keyParams...)
-		if errGet != nil {
-			return errGet
-		}
-		if isBlankPage {
-			errDelBlankPage := srtd.HasData(ctx, pipe, keyParams...)
-			if errDelBlankPage != nil {
-				return errDelBlankPage
-			}
-		}
+// IngestItem places an item into the index. Pass seed = true while seeding: the item
+// is added unconditionally. With seed = false the whole read-decide-write decision runs
+// inside Redis as one atomic command, so it costs a single enqueued command and cannot
+// race another writer.
+func (srtd *Sorted[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, seed bool, keyParams ...string) error {
+	_, err := srtd.ingest(ctx, pipe, item, seed, keyParams...)
+	return err
+}
 
-		if srtd.sortedSetClient.Count(ctx, keyParams...) > 0 {
-			srtd.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
-		}
-	} else {
-		srtd.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...)
+func (srtd *Sorted[T]) ingest(ctx context.Context, pipe redis.Pipeliner, item T, seed bool, keyParams ...string) (*redis.Cmd, error) {
+	if pipe == nil {
+		return nil, errors.New("redifu: IngestItem requires a pipeline")
 	}
 
-	return nil
+	score, err := srtd.scorer.score(item)
+	if err != nil {
+		return nil, err
+	}
+
+	if seed {
+		if errSet := srtd.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...); errSet != nil {
+			return nil, errSet
+		}
+		return nil, nil
+	}
+
+	key, errKey := srtd.sortedSetClient.key(keyParams)
+	if errKey != nil {
+		return nil, errKey
+	}
+
+	return sortedIngestScript.Eval(
+		ctx, pipe,
+		[]string{key, key + markerBlankPage},
+		formatScore(score), item.GetRandId(),
+	), nil
 }
 
 func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
@@ -141,9 +229,8 @@ func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 	// Only the index is touched. The item stays in Base, because it may well be a member
 	// of other collections; deleting the entity itself is Base.Del's job.
-	errDel := srtd.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...)
-	if errDel != nil {
-		return errDel
+	if err := srtd.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...); err != nil {
+		return err
 	}
 
 	if selfPipe {
@@ -165,43 +252,44 @@ func (srtd *Sorted[T]) Fetch(direction string) *sortedFetchBuilder[T] {
 	}
 }
 
-func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) {
-	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
-	lastPageKey := sortedSetKey + ":blankpage"
+func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	key, err := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
+	if err != nil {
+		return err
+	}
 
-	pipe.Set(
-		ctx,
-		lastPageKey,
-		1,
-		srtd.timeToLive,
-	)
+	pipe.Set(ctx, key, 1, srtd.timeToLive)
+	return nil
 }
 
 func (srtd *Sorted[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
-	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
-	lastPageKey := sortedSetKey + ":blankpage"
+	key, err := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
+	if err != nil {
+		return err
+	}
 
-	pipe.Del(ctx, lastPageKey)
+	pipe.Del(ctx, key)
 	return nil
 }
 
 func (srtd *Sorted[T]) IsEmpty(ctx context.Context, keyParams ...string) (bool, error) {
-	sortedSetKey := joinParam(srtd.sortedSetClient.sortedSetKeyFormat, keyParams)
-	lastPageKey := sortedSetKey + ":blankpage"
+	key, errKey := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
+	if errKey != nil {
+		return false, errKey
+	}
 
-	getLastPageKey := srtd.client.Get(ctx, lastPageKey)
-	if getLastPageKey.Err() != nil {
-		if getLastPageKey.Err() == redis.Nil {
+	return markerIsSet(ctx, srtd.client, key)
+}
+
+func markerIsSet(ctx context.Context, client redis.UniversalClient, key string) (bool, error) {
+	result := client.Get(ctx, key)
+	if result.Err() != nil {
+		if errors.Is(result.Err(), redis.Nil) {
 			return false, nil
-		} else {
-			return false, getLastPageKey.Err()
 		}
+		return false, result.Err()
 	}
-
-	if getLastPageKey.Val() == "1" {
-		return true, nil
-	}
-	return false, nil
+	return result.Val() == "1", nil
 }
 
 func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string) (bool, error) {
@@ -209,15 +297,16 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 	if err != nil {
 		return false, err
 	}
-
-	if !isBlankPage {
-		if srtd.sortedSetClient.Count(ctx, keyParams...) > 0 {
-			return false, nil
-		}
-		return true, nil
-	} else {
+	if isBlankPage {
 		return false, nil
 	}
+
+	count, errCount := srtd.sortedSetClient.Count(ctx, keyParams...)
+	if errCount != nil {
+		return false, errCount
+	}
+
+	return count == 0, nil
 }
 
 // Purge invalidates the collection: the sorted set and its state marker are dropped so
@@ -225,16 +314,14 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 func (srtd *Sorted[T]) Purge(ctx context.Context, keyParams ...string) error {
 	pipe := srtd.client.Pipeline()
 
-	err := srtd.sortedSetClient.Delete(ctx, pipe, keyParams...)
-	if err != nil {
+	if err := srtd.sortedSetClient.Delete(ctx, pipe, keyParams...); err != nil {
 		return err
 	}
 
 	// Without this the collection stays flagged as confirmed-empty and RequiresSeeding
 	// keeps returning false, so a purge would silently kill it instead of rebuilding it.
-	errHasData := srtd.HasData(ctx, pipe, keyParams...)
-	if errHasData != nil {
-		return errHasData
+	if err := srtd.HasData(ctx, pipe, keyParams...); err != nil {
+		return err
 	}
 
 	_, errPipe := pipe.Exec(ctx)
@@ -253,7 +340,7 @@ type sortedFetchBuilder[T item.Blueprint] struct {
 }
 
 func (s *sortedFetchBuilder[T]) WithParams(params ...string) *sortedFetchBuilder[T] {
-	s.keyParams = params
+	s.keyParams = appendParams(nil, params...)
 	return s
 }
 
@@ -271,24 +358,21 @@ func (s *sortedFetchBuilder[T]) WithRange(lowerbound int64, upperbound int64) *s
 }
 
 func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
-	if !s.byScore {
-		return s.sorted.sortedSetClient.Fetch(
-			ctx,
-			s.sorted.baseClient,
-			s.direction,
-			s.processor,
-			s.processorArgs,
-			s.sorted.relations,
-			0, -1, false, s.keyParams...)
-	} else {
-		return s.sorted.sortedSetClient.Fetch(
-			ctx,
-			s.sorted.baseClient,
-			s.direction,
-			s.processor,
-			s.processorArgs,
-			s.sorted.relations,
-			s.lowerbound,
-			s.upperbound, true, s.keyParams...)
+	start, stop := int64(0), int64(-1)
+	if s.byScore {
+		start, stop = s.lowerbound, s.upperbound
 	}
+
+	return s.sorted.sortedSetClient.Fetch(
+		ctx,
+		s.sorted.baseClient,
+		s.direction,
+		s.processor,
+		s.processorArgs,
+		combineRelations(s.sorted.baseClient, s.sorted.relations),
+		s.sorted.baseClient.relationDepth,
+		start,
+		stop,
+		s.byScore,
+		s.keyParams...)
 }

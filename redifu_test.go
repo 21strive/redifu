@@ -2,6 +2,7 @@ package redifu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -40,6 +41,59 @@ type Post struct {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// constructor helpers — every constructor now validates its key format and
+// returns an error, so tests unwrap it here instead of at every call site.
+// ---------------------------------------------------------------------------
+
+func mustBase[T item.Blueprint](t *testing.T, client redis.UniversalClient, keyFormat string, ttl time.Duration) *Base[T] {
+	t.Helper()
+	base, err := NewBase[T](client, keyFormat, ttl)
+	if err != nil {
+		t.Fatalf("NewBase: %v", err)
+	}
+	return base
+}
+
+func mustTimeline[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, perPage int64, direction string, ttl time.Duration) *Timeline[T] {
+	t.Helper()
+	timeline, err := NewTimeline[T](client, base, keyFormat, perPage, direction, ttl)
+	if err != nil {
+		t.Fatalf("NewTimeline: %v", err)
+	}
+	return timeline
+}
+
+func mustSorted[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, ttl time.Duration) *Sorted[T] {
+	t.Helper()
+	sorted, err := NewSorted[T](client, base, keyFormat, ttl)
+	if err != nil {
+		t.Fatalf("NewSorted: %v", err)
+	}
+	return sorted
+}
+
+func mustPage[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, perPage int64, direction string, ttl time.Duration) *Page[T] {
+	t.Helper()
+	page, err := NewPage[T](client, base, keyFormat, perPage, direction, ttl)
+	if err != nil {
+		t.Fatalf("NewPage: %v", err)
+	}
+	return page
+}
+
+func mustTimeSeries[T item.Blueprint](t *testing.T, client redis.UniversalClient, base *Base[T], keyFormat string, ttl time.Duration) *TimeSeries[T] {
+	t.Helper()
+	series, err := NewTimeSeries[T](client, base, keyFormat, ttl)
+	if err != nil {
+		t.Fatalf("NewTimeSeries: %v", err)
+	}
+	return series
+}
+
+// indexKey mirrors the cluster hash tag redifu wraps every collection key in.
+func indexKey(key string) string { return "{" + key + "}" }
 
 func newAccount(t *testing.T, name string) *Account {
 	t.Helper()
@@ -134,6 +188,13 @@ func (c *commandCounter) count(key string) int {
 	return c.counts[key]
 }
 
+// reads counts item reads however they were issued. Base reads an item with GETEX so
+// that reading a shared entity keeps it alive, and falls back to GET when touch-on-read
+// is switched off.
+func (c *commandCounter) reads(key string) int {
+	return c.count("get "+key) + c.count("getex "+key)
+}
+
 func (c *commandCounter) DialHook(next redis.DialHook) redis.DialHook { return next }
 
 func (c *commandCounter) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
@@ -160,8 +221,8 @@ func TestAddItemRefreshesTTLOfExistingItem(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	post := newPost(t, "old post", time.Now())
 	if err := base.Set(ctx, post); err != nil {
@@ -171,8 +232,10 @@ func TestAddItemRefreshesTTLOfExistingItem(t *testing.T) {
 	// The item has been sitting in Base for six days when it is added to an index.
 	server.FastForward(6 * 24 * time.Hour)
 
-	if err := timeline.AddItem(ctx, post, "u1"); err != nil {
-		t.Fatalf("AddItem: %v", err)
+	// The timeline has never been seeded, so the item is not placed into the index and
+	// AddItem says so. It must still have refreshed the item's TTL.
+	if err := timeline.AddItem(ctx, post, "u1"); !errors.Is(err, ErrNotIngested) {
+		t.Fatalf("AddItem = %v, want ErrNotIngested", err)
 	}
 
 	itemTTL := server.TTL("post:" + post.GetRandId())
@@ -188,8 +251,8 @@ func TestAddItemDoesNotOverwriteExistingPayload(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	post := newPost(t, "full value", time.Now())
 	seedTimeline(t, client, base, timeline, "u1", post)
@@ -216,12 +279,12 @@ func TestAddItemWritesItemThatDoesNotExistYet(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	sorted := NewSorted[*Post](client, base, feedKeyFormat, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	sorted := mustSorted[*Post](t, client, base, feedKeyFormat, indexTTL)
 
 	post := newPost(t, "brand new", time.Now())
-	if err := sorted.AddItem(ctx, post, "u1"); err != nil {
-		t.Fatalf("AddItem: %v", err)
+	if err := sorted.AddItem(ctx, post, "u1"); !errors.Is(err, ErrNotIngested) {
+		t.Fatalf("AddItem = %v, want ErrNotIngested on an unseeded collection", err)
 	}
 
 	stored, err := base.Get(ctx, post.GetRandId())
@@ -240,8 +303,8 @@ func TestAddItemWithCallerPipelineDoesNotExecute(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	post := newPost(t, "pipelined", time.Now())
 
@@ -268,8 +331,8 @@ func TestIndexNeverOutlivesItsItems(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	now := time.Now()
 	stale := newPost(t, "written six days ago", now)
@@ -308,8 +371,8 @@ func TestRemoveItemKeepsItemInOtherIndexes(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	post := newPost(t, "shared", time.Now())
 	seedTimeline(t, client, base, timeline, "u1", post)
@@ -340,8 +403,8 @@ func TestRemoveItemLeavesBaseKeyUntouched(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	sorted := NewSorted[*Post](client, base, feedKeyFormat, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	sorted := mustSorted[*Post](t, client, base, feedKeyFormat, indexTTL)
 
 	post := newPost(t, "kept", time.Now())
 	seedSorted(t, client, base, sorted, "u1", post)
@@ -357,7 +420,11 @@ func TestRemoveItemLeavesBaseKeyUntouched(t *testing.T) {
 	if after := server.TTL("post:" + post.GetRandId()); after != before {
 		t.Fatalf("item TTL changed from %v to %v", before, after)
 	}
-	if count := sorted.Count(ctx, "u1"); count != 0 {
+	count, errCount := sorted.Count(ctx, "u1")
+	if errCount != nil {
+		t.Fatalf("Count: %v", errCount)
+	}
+	if count != 0 {
 		t.Fatalf("index still holds %d members", count)
 	}
 }
@@ -366,15 +433,19 @@ func TestPurgeDropsIndexAndMarkersButKeepsItems(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	post := newPost(t, "kept", time.Now())
 	seedTimeline(t, client, base, timeline, "u1", post)
 
 	pipe := client.Pipeline()
-	timeline.MarkFirstPage(ctx, pipe, "u1")
-	timeline.MarkLastPage(ctx, pipe, "u1")
+	if err := timeline.MarkFirstPage(ctx, pipe, "u1"); err != nil {
+		t.Fatalf("MarkFirstPage: %v", err)
+	}
+	if err := timeline.MarkLastPage(ctx, pipe, "u1"); err != nil {
+		t.Fatalf("MarkLastPage: %v", err)
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
@@ -383,10 +454,14 @@ func TestPurgeDropsIndexAndMarkersButKeepsItems(t *testing.T) {
 		t.Fatalf("Purge: %v", err)
 	}
 
-	if server.Exists("feed:u1") {
+	if server.Exists(indexKey("feed:u1")) {
 		t.Fatal("Purge left the index behind")
 	}
-	for _, marker := range []string{"feed:u1:firstpage", "feed:u1:lastpage", "feed:u1:blankpage"} {
+	for _, marker := range []string{
+		indexKey("feed:u1") + ":firstpage",
+		indexKey("feed:u1") + ":lastpage",
+		indexKey("feed:u1") + ":blankpage",
+	} {
 		if server.Exists(marker) {
 			t.Fatalf("Purge left marker %s behind", marker)
 		}
@@ -408,8 +483,8 @@ func TestSortedPurgeClearsBlankPageMarker(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	sorted := NewSorted[*Post](client, base, feedKeyFormat, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	sorted := mustSorted[*Post](t, client, base, feedKeyFormat, indexTTL)
 
 	pipe := client.Pipeline()
 	sorted.MarkEmpty(ctx, pipe, "u1")
@@ -442,8 +517,8 @@ func TestDeletingAnEntityIsBaseDelAlongsideRemoveItem(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	base := NewBase[*Post](client, postKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, base, feedKeyFormat, 20, Descending, indexTTL)
+	base := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, base, feedKeyFormat, 20, Descending, indexTTL)
 
 	post := newPost(t, "doomed", time.Now())
 	seedTimeline(t, client, base, timeline, "u1", post)
@@ -491,9 +566,9 @@ func TestRelationResolvesOnFetch(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, postBase, feedKeyFormat, 20, Descending, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, postBase, feedKeyFormat, 20, Descending, indexTTL)
 	timeline.AddRelation(relateAuthor(t, accountBase))
 
 	author := newAccount(t, "Ada")
@@ -529,9 +604,9 @@ func TestFetchedItemIsSafeToWriteBack(t *testing.T) {
 	ctx := context.Background()
 	server, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, postBase, feedKeyFormat, 20, Descending, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, postBase, feedKeyFormat, 20, Descending, indexTTL)
 	timeline.AddRelation(relateAuthor(t, accountBase))
 
 	author := newAccount(t, "Ada")
@@ -567,9 +642,9 @@ func TestRelationReadsSharedEntityOnce(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, postBase, feedKeyFormat, 20, Descending, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, postBase, feedKeyFormat, 20, Descending, indexTTL)
 	timeline.AddRelation(relateAuthor(t, accountBase))
 
 	author := newAccount(t, "Ada")
@@ -595,7 +670,7 @@ func TestRelationReadsSharedEntityOnce(t *testing.T) {
 		t.Fatalf("fetched %d items, want 3", len(output.Items()))
 	}
 
-	reads := counter.count("get account:" + author.GetRandId())
+	reads := counter.reads("account:" + author.GetRandId())
 	if reads != 1 {
 		t.Fatalf("read the shared account %d times, want 1", reads)
 	}
@@ -610,9 +685,9 @@ func TestTwoRelationsOfTheSameType(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, postBase, feedKeyFormat, 20, Descending, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, postBase, feedKeyFormat, 20, Descending, indexTTL)
 
 	editorRelation, err := Relate(accountBase,
 		func(p *Post) string { return p.EditorRandId },
@@ -649,9 +724,9 @@ func TestMissingRelatedEntityLeavesFieldNil(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, postBase, feedKeyFormat, 20, Descending, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, postBase, feedKeyFormat, 20, Descending, indexTTL)
 	timeline.AddRelation(relateAuthor(t, accountBase))
 
 	post := newPost(t, "orphan", time.Now())
@@ -674,9 +749,9 @@ func TestUpdatingRelatedEntityShowsEverywhere(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	timeline := NewTimeline[*Post](client, postBase, feedKeyFormat, 20, Descending, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	timeline := mustTimeline[*Post](t, client, postBase, feedKeyFormat, 20, Descending, indexTTL)
 	timeline.AddRelation(relateAuthor(t, accountBase))
 
 	author := newAccount(t, "Ada")
@@ -706,7 +781,7 @@ func TestUpdatingRelatedEntityShowsEverywhere(t *testing.T) {
 func TestRelateRejectsValueItemType(t *testing.T) {
 	_, client := newTestRedis(t)
 
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
 
 	_, err := Relate(accountBase,
 		func(p Post) string { return p.AuthorRandId },
@@ -724,9 +799,9 @@ func TestRelationOnSortedAndPage(t *testing.T) {
 	ctx := context.Background()
 	_, client := newTestRedis(t)
 
-	postBase := NewBase[*Post](client, postKeyFormat, baseTTL)
-	accountBase := NewBase[*Account](client, accountKeyFormat, baseTTL)
-	sorted := NewSorted[*Post](client, postBase, feedKeyFormat, indexTTL)
+	postBase := mustBase[*Post](t, client, postKeyFormat, baseTTL)
+	accountBase := mustBase[*Account](t, client, accountKeyFormat, baseTTL)
+	sorted := mustSorted[*Post](t, client, postBase, feedKeyFormat, indexTTL)
 	sorted.AddRelation(relateAuthor(t, accountBase))
 
 	author := newAccount(t, "Ada")

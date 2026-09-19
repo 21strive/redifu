@@ -120,9 +120,16 @@ var (
 )
 
 func InitRedis(redisClient redis.UniversalClient) {
-    PostBase = redifu.NewBase[*Post](redisClient, postKeyFormat, postTTL)
+    var err error
 
-    PostTimeline = redifu.NewTimeline[*Post](
+    // Every constructor validates its key format and returns an error. Handle it —
+    // this is the only place a bad key format can be caught.
+    PostBase, err = redifu.NewBase[*Post](redisClient, postKeyFormat, postTTL)
+    if err != nil {
+        log.Fatalf("redifu PostBase: %v", err)
+    }
+
+    PostTimeline, err = redifu.NewTimeline[*Post](
         redisClient,
         PostBase,
         postFeedKeyFormat,
@@ -130,13 +137,19 @@ func InitRedis(redisClient redis.UniversalClient) {
         redifu.Descending, // direction: Ascending or Descending (Timeline, Sorted, Page only — TimeSeries is always Descending)
         2*24*time.Hour,
     )
+    if err != nil {
+        log.Fatalf("redifu PostTimeline: %v", err)
+    }
 
     // sortingReference: the struct field name used as the sorted set score.
     // Default (if not set) is createdAt via GetCreatedAt().
     // Set this when sorting by a field other than createdAt.
     // Supported field types: time.Time, *time.Time, int64.
+    // The field is resolved and type-checked here, so a typo fails at startup.
     // If set, the ORDER BY column in seeder SQL must match this field.
-    // PostTimeline.SetSortingReference("UpdatedAt")
+    // if err := PostTimeline.SetSortingReference("UpdatedAt"); err != nil {
+    //     log.Fatalf("redifu sorting reference: %v", err)
+    // }
 
     // Add a Relation if Post references another entity.
     // You supply two functions: where the randId lives, and where the entity goes.
@@ -145,11 +158,26 @@ func InitRedis(redisClient redis.UniversalClient) {
         func(p *Post, a *account.Account)     { p.Author = a },
     )
     if err != nil {
+        // Also fires when Post.Author is missing its json:"-" tag.
         log.Fatalf("redifu relation error: %v", err)
     }
-    PostTimeline.AddRelation(authorRelation)
+
+    // Register on the Base, not on one index: the relation then resolves on every read
+    // of a Post — including PostBase.Get for a single item — and on any entity that
+    // relates to Post in turn. Use index.AddRelation only for index-specific extras.
+    PostBase.AddRelation(authorRelation)
 }
 ```
+
+### Errors you handle
+
+| Error | Means | What to do |
+|-------|-------|------------|
+| `redifu.ErrNotFound` | the item key is not in Base | treat as a cache miss; seed or 404 |
+| `redifu.ErrNotIngested` | `AddItem` stored the item and refreshed its TTL, but did not index it — the collection is not seeded, or the item is outside the window this index holds | usually ignore; it is not a failure |
+| `redifu.ErrResetPagination` | none of the cursors you passed are in the index any more | tell the client to restart the feed |
+| `redifu.ErrRelationNotTransient` | a relation field is missing `json:"-"` | fix the tag, then re-save affected entities |
+| `redifu.ErrScoreOutOfRange` | an `int64` sorting reference is beyond 2^53 | do not sort by snowflake ids |
 
 ### 3. Scanner functions
 
@@ -199,8 +227,13 @@ authorRelation, err := redifu.Relate(account.AccountBase,
 if err != nil {
     return err
 }
-PostTimeline.AddRelation(authorRelation)
+PostBase.AddRelation(authorRelation)
 ```
+
+Register it on the **`Base`**. The relation then travels with the entity: it resolves on
+`PostBase.Get`, on `PostBase.GetMany`, on every index built over `PostBase`, and on any other
+entity that relates to `Post`. `index.AddRelation` is for relations that only make sense for
+that one index.
 
 Three arguments:
 
@@ -213,14 +246,25 @@ Three arguments:
 These are ordinary Go functions, so the compiler checks them. Rename `AuthorRandId` and the
 build fails at the Relation declaration — it cannot silently resolve to nothing at runtime.
 
-`Relate` returns an error if the item type is not a pointer (`Base[Post]` instead of
-`Base[*Post]`). Handle it at startup; it is a wiring mistake, not a runtime condition.
+`Relate` returns an error for two wiring mistakes, both caught at startup:
+
+- the item type is not a pointer (`Base[Post]` instead of `Base[*Post]`)
+- the field the setter writes into is not tagged `json:"-"` (`ErrRelationNotTransient`)
+
+The second one is checked by rendering a blank `Post` before and after running your setter: if
+the account shows up in the post's stored JSON, the relation is refused. Without that tag, the
+first write-back of a fetched post bakes a copy of the account into the post's own key, and that
+copy never updates again.
 
 Register as many as the entity needs:
 
 ```go
-PostTimeline.AddRelation(authorRelation, categoryRelation, brandRelation)
+PostBase.AddRelation(authorRelation, categoryRelation, brandRelation)
 ```
+
+Relations also nest. If `Account` has a relation to `Organisation`, fetching a `Post` gives you
+`post.Author.Organisation` filled in — one batched round-trip per level, capped at
+`redifu.DefaultRelationDepth` (4) so a self-referential relation terminates.
 
 ### What happens on fetch
 
@@ -419,10 +463,12 @@ func GetPostFeed(ctx context.Context, userRandId string, lastRandIds []string) (
 
     output := PostTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
 
-    // ResetPagination: the client had a cursor (lastRandIds is non-empty) but the
-    // sorted set expired mid-pagination. ZCard returned 0 on a set that previously
-    // existed. Discard the cursor and re-seed from the first page.
-    if errors.Is(output.Error(), redifu.ResetPagination) {
+    // ErrResetPagination: the client had a cursor, but none of the ids it passed are
+    // in the index any more — it expired mid-pagination, was purged, or those items
+    // were removed. Discard the cursor and re-seed from the first page. Redifu never
+    // silently serves page one in this case, because the client would receive items
+    // it already has with no way to know.
+    if errors.Is(output.Error(), redifu.ErrResetPagination) {
         if err := seedPostFeed(ctx, userRandId, 0, ""); err != nil {
             return nil, "", "", err
         }
@@ -436,6 +482,12 @@ func GetPostFeed(ctx context.Context, userRandId string, lastRandIds []string) (
     return output.Items(), output.ValidLastId(), output.Position(), nil
 }
 ```
+
+**Drive "load more" from `output.HasMore()`, not from how many items came back.**
+`HasMore()` is read from the index before any item is loaded, so items that have expired out of
+`Base` in the middle of a feed cannot be mistaken for the end of it. `output.Dangling()` reports
+how many members of the page pointed at items that no longer exist — a steady non-zero value
+means your item TTL is too short relative to your index TTL.
 
 ### The `subtraction` parameter
 
@@ -675,7 +727,11 @@ func seedTransactions(ctx context.Context, accountRandId string, from, to time.T
         }
 
         pipe := redisClient.Pipeline()
-        alreadySeeded := TxTimeSeries.Count(ctx, accountRandId) > 0
+        seededCount, err := TxTimeSeries.Count(ctx, accountRandId)
+        if err != nil {
+            return err
+        }
+        alreadySeeded := seededCount > 0
         var count int64
 
         for rows.Next() {
@@ -868,7 +924,7 @@ local `map[string]bool` if the payload is large.
 
 - Do not call `redisClient.Set(...)` / `redisClient.Get(...)` directly for entity data — use `Base[T]`
 - Do not store a full related object inside a parent entity — keep its randId and declare a Relation
-- Do not omit `json:"-"` on a relation field — without it, writing a fetched item back to `Base` bakes a flattened copy of the related entity into the key and breaks the singleton permanently
+- Do not omit `json:"-"` on a relation field — without it, writing a fetched item back to `Base` bakes a flattened copy of the related entity into the key and breaks the singleton permanently. `Relate` now refuses such a relation at startup, so this fails loudly rather than silently
 - Do not clear a relation's randId field after fetching — it is the only pointer that exists
 - Do not assign a relation field in a scanner — scanners set the randId, Relations set the entity
 - Do not purge or re-seed a list because a related entity changed — write that entity's `Base` and every list reflects it
@@ -876,9 +932,13 @@ local `map[string]bool` if the payload is large.
 - Do not call `pipe.Exec()` inside a function that receives `pipe` as a parameter
 - Do not expect `RemoveItem` or `Purge` to delete an item — they only touch the index; deleting the entity is `Base.Del`, paired with a `RemoveItem` in the same pipeline
 - Do not use `AddItem` to update an item's contents — it only places the item into the index (and refreshes its TTL); use `Base.Set`
-- Do not ignore `redifu.ResetPagination` — always handle it by discarding the cursor and re-seeding from page one
+- Do not ignore `redifu.ErrResetPagination` — always handle it by discarding the cursor and re-seeding from page one
+- Do not treat a short page as the end of a feed — use `output.HasMore()`, which is read from the index rather than from how many items survived hydration
+- Do not treat `redifu.ErrNotIngested` from `AddItem` as a failure — the item was stored and its TTL refreshed; it just did not enter the index yet
+- Do not ignore the error from a constructor, `Count` or `SetSortingReference`
 - Do not give a collection's sorted set a TTL longer than (or equal to) its `Base` TTL — `Base` must outlive the index
 - Do not apply `subtraction` to anything but a Timeline seeding function — it is a Timeline-only concept
 - Do not call `pipe.Exec` inside your seeding loop — enqueue everything, execute once at the end
 - Do not seed a `TimeSeries` range without `AddSegment` — the range will be re-queried on every request
-- Do not try to `AddItem`/`RemoveItem` into a `Page` — pages are snapshots; `Purge` and re-seed instead
+- Do not sort by a snowflake id — an `int64` score beyond 2^53 is refused, because a float64 cannot hold it exactly and the index would reorder itself silently
+- Do not register a relation on an index when it belongs to the entity — `Base.AddRelation` makes it resolve everywhere, `index.AddRelation` only in that index
