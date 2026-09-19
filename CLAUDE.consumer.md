@@ -940,7 +940,19 @@ warms that key. Guard for it, the same as any other relation.
 
 ### Which `Base` gets the `AddRelation`
 
-The one that owns the pointer field.
+`AddRelation` still exists on `Sorted`, `Timeline`, `Page` and `TimeSeries` — nothing was
+removed. An index fetch resolves **the entity's relations plus that index's own**, so the two
+are additive, not exclusive. The choice is one of scope and cost:
+
+| Register on | Resolves | Use when |
+|---|---|---|
+| `Base` | every read of that entity — `Get`, `GetMany`, every index over it, and any entity that relates to it | the relation is a fact about the entity (the default) |
+| an index | only fetches through that index | the relation is only needed in that one view, and you do not want to pay for it on every other read |
+
+Registering the same relation in both places is kept once, so an accidental double
+registration costs nothing.
+
+For a `Base` relation, the one that owns the pointer field.
 
 ```go
 AccountBase.AddRelation(organisationRelation) // Account.OrganisationRandId

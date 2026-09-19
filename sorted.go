@@ -18,6 +18,10 @@ const (
 // combineRelations merges the relations declared on the entity itself with the extra
 // ones declared on one index. The entity's relations travel with it everywhere, which
 // is the point: a Post's author does not depend on which index the Post came through.
+//
+// A relation registered in both places is kept once. Registering it twice is the
+// natural mistake to make while moving relations onto Base, and without this it would
+// silently double every read that relation performs.
 func combineRelations[T item.Blueprint](baseClient *Base[T], extra []Relation[T]) []Relation[T] {
 	if len(extra) == 0 {
 		return baseClient.relations
@@ -25,9 +29,25 @@ func combineRelations[T item.Blueprint](baseClient *Base[T], extra []Relation[T]
 	if len(baseClient.relations) == 0 {
 		return extra
 	}
+
 	combined := make([]Relation[T], 0, len(baseClient.relations)+len(extra))
-	combined = append(combined, baseClient.relations...)
-	combined = append(combined, extra...)
+	seen := make(map[Relation[T]]struct{}, len(baseClient.relations)+len(extra))
+
+	for _, relation := range baseClient.relations {
+		if _, duplicate := seen[relation]; duplicate {
+			continue
+		}
+		seen[relation] = struct{}{}
+		combined = append(combined, relation)
+	}
+	for _, relation := range extra {
+		if _, duplicate := seen[relation]; duplicate {
+			continue
+		}
+		seen[relation] = struct{}{}
+		combined = append(combined, relation)
+	}
+
 	return combined
 }
 
