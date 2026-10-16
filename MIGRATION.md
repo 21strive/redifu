@@ -255,11 +255,13 @@ the same keys. Migrate an entity when you touch it, not before.
 
 Two things do change if you adopt `Record`:
 
-- **`InitRecord` does not allocate named pointer fields.** `item.InitItem` walked every
+- **`InitRecord` does not allocate relation fields.** `item.InitItem` walked every
   field and allocated each nil pointer, which handed a relation field a non-nil empty
-  entity before any fetch had run. `InitRecord` allocates embedded pointers only, so a
-  relation field stays nil until a fetch resolves it — which is what the rest of redifu
-  documents and what `Relate`'s transient probe assumes.
+  entity before any fetch had run. `InitRecord` leaves a relation field (a pointer to an
+  entity, a `Blueprint`) nil until a fetch resolves it — which is what the rest of redifu
+  documents and what `Relate`'s transient probe assumes. Every other nil pointer field
+  still gets a zero value, as in rc.2: code written against rc.2 reads (and persists)
+  them right after creating an entity.
 - **`RandId` draws from `crypto/rand`.** Same 16 characters, same alphabet, same wire
   format; a randId is a public handle that ends up in URLs, so it is no longer drawn
   from the `math/rand` global source.
