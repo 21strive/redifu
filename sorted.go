@@ -439,16 +439,30 @@ func (s *sortedFetchBuilder[T]) members(ctx context.Context) ([]string, error) {
 	}
 }
 
+// Exec returns the items the fetch covers. Members whose item has expired out of Base
+// are left out — and removed from the index, unless self-healing is off — so the result
+// can be shorter than the range. Use ExecReport to learn whether it is.
 func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
+	items, _, err := s.ExecReport(ctx)
+	return items, err
+}
+
+// ExecReport is Exec, also reporting how many members of the range pointed at items that
+// no longer exist in Base. Exec drops them without a trace, so "this list is shorter" and
+// "this list is complete" looked the same. A non-zero count means the collection is
+// missing items the database may still hold — their keys expired before the index did —
+// so a consumer that needs the whole list (a full collection, a month of bookings)
+// reseeds it. Self-healing removes those members either way, as Exec does.
+func (s *sortedFetchBuilder[T]) ExecReport(ctx context.Context) ([]T, int, error) {
 	members, err := s.members(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(members) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
-	items, _, errHydrate := s.sorted.sortedSetClient.hydrate(
+	items, dangling, errHydrate := s.sorted.sortedSetClient.hydrate(
 		ctx,
 		s.sorted.baseClient,
 		members,
@@ -459,8 +473,8 @@ func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 		s.keyParams,
 	)
 	if errHydrate != nil {
-		return nil, errHydrate
+		return nil, 0, errHydrate
 	}
 
-	return items, nil
+	return items, dangling, nil
 }

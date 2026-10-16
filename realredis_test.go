@@ -90,6 +90,8 @@ func TestRealRedis(t *testing.T) {
 		"AnOldItemWaitsForTheTopUpOfAPartialTimeline": scenarioAnOldItemWaitsForTheTopUpOfAPartialTimeline,
 		"SortedRankRange":                             scenarioSortedRankRange,
 		"SortedScoreRangeWithLimit":                   scenarioSortedScoreRangeWithLimit,
+		"SortedExecReportCountsDanglingMembers":       scenarioSortedExecReportCountsDanglingMembers,
+		"SortedExecReportCountsOnlyTheRangeItRead":    scenarioSortedExecReportCountsOnlyTheRangeItRead,
 	}
 
 	for name, scenario := range scenarios {

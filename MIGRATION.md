@@ -369,6 +369,17 @@ An addition; `Fetch`, `WithRange` and `Exec` behave as before.
 Ranks move when members leave — self-healing removes dangling members during a read — so
 for pages that must not shift, keep the position in the score and page with `WithRange`.
 
+## 19. Sorted and Page reads report dangling members
+
+An addition; `Exec` returns exactly what it did.
+
+`Exec` on a `Sorted` or `Page` fetch leaves out members whose item has expired out of `Base`,
+so a list missing items looked like a complete one. `ExecReport(ctx) ([]T, int, error)`
+returns the same items and how many members were dangling — the `Sorted`/`Page` counterpart
+of a Timeline's `Dangling()`. Self-healing removes those members either way. A consumer
+that needs a whole list (a full collection, a calendar month) reseeds when the count is not
+zero.
+
 ---
 
 ## Checklist

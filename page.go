@@ -212,10 +212,18 @@ func (f *pageFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), p
 }
 
 func (f *pageFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
+	items, _, err := f.ExecReport(ctx)
+	return items, err
+}
+
+// ExecReport is Exec, also reporting how many members of the page pointed at items that
+// no longer exist in Base — see sortedFetchBuilder.ExecReport. A page is a snapshot, so a
+// non-zero count means it will stay short until it is purged and reseeded.
+func (f *pageFetchBuilder[T]) ExecReport(ctx context.Context) ([]T, int, error) {
 	// processorArgs is forwarded with ... — without it the consumer's arguments arrive
 	// wrapped in one more layer of slice than they passed.
 	return f.page.sorted.Fetch(f.page.direction).
 		WithParams(f.page.pageParams(f.pageNumber, f.params)...).
 		WithProcessor(f.processor, f.processorArgs...).
-		Exec(ctx)
+		ExecReport(ctx)
 }

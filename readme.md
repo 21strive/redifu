@@ -140,6 +140,10 @@ items, err := commentSorted.Fetch(redifu.Descending).
     WithParams(postRandId).
     WithRankRange(0, 9).
     Exec(ctx)
+
+// ExecReport also counts the members whose item had expired out of Base — Exec drops
+// them silently, so a list that must be whole reseeds when the count is not zero
+items, dangling, err := commentSorted.Fetch(redifu.Ascending).WithParams(postRandId).ExecReport(ctx)
 ```
 
 ---
