@@ -802,6 +802,11 @@ var (
 func InitTransaction(redisClient redis.UniversalClient) {
     TxBase = redifu.NewBase[*Transaction](redisClient, "tx:%s", 7*24*time.Hour)
     TxTimeSeries = redifu.NewTimeSeries[*Transaction](redisClient, TxBase, "tx:account:%s", 2*24*time.Hour)
+
+    // Sorting by an int64 column? Say what it counts. Without this, Unix seconds are read
+    // as milliseconds: every row lands in January 1970, outside every range you fetch.
+    // if err := TxTimeSeries.SetSortingReference("BookedAt"); err != nil { ... } // int64, Unix seconds
+    // if err := TxTimeSeries.SetScoreUnit(time.Second); err != nil { ... }
 }
 
 func seedTransactions(ctx context.Context, accountRandId string, from, to time.Time) error {

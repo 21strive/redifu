@@ -30,6 +30,9 @@ type TimeSeries[T Blueprint] struct {
 	segments   *keyBuilder
 	timeToLive time.Duration
 	sorted     *Sorted[T]
+	// unit is what an int64 score counts since the Unix epoch. A time.Time sorting
+	// reference is always scored in milliseconds.
+	unit time.Duration
 }
 
 func NewTimeSeries[T Blueprint](
@@ -57,6 +60,7 @@ func NewTimeSeries[T Blueprint](
 		sorted:     sorted,
 		segments:   keys.suffixed(":segments"),
 		timeToLive: timeToLive,
+		unit:       time.Millisecond,
 	}, nil
 }
 
@@ -71,8 +75,74 @@ func (s *TimeSeries[T]) GetRelations() []Relation[T] {
 // SetSortingReference chooses the struct field used as the timestamp. TimeSeries reads
 // this field to decide which seeded segment an item belongs to, but had no way to set
 // it — every series was pinned to createdAt whatever the consumer intended.
+//
+// A time field is scored in milliseconds, so it is refused while SetScoreUnit has set
+// another unit.
 func (s *TimeSeries[T]) SetSortingReference(sortingReference string) error {
-	return s.sorted.SetSortingReference(sortingReference)
+	resolved, err := newScorer[T](sortingReference)
+	if err != nil {
+		return err
+	}
+	if s.unit != time.Millisecond && resolved.kind != scoreFromInt64 {
+		return fmt.Errorf("redifu: sorting reference %q is a time and is scored in milliseconds, but the score unit is %v — only an int64 reference can count another unit", sortingReference, s.unit)
+	}
+	s.sorted.scorer = resolved
+	return nil
+}
+
+// SetScoreUnit declares what an int64 sorting reference counts since the Unix epoch:
+// time.Millisecond (the default), time.Second or time.Microsecond. The series uses it
+// to turn an item's score into the instant whose segment must cover it, and to turn the
+// bounds of Fetch into a score range. Without it, a Unix-seconds field was read as
+// milliseconds: every item landed in January 1970, outside every segment and every
+// range.
+//
+// A time.Time sorting reference, createdAt included, is always scored in milliseconds.
+// Another unit is refused while a time field is the sorting reference, and a series
+// left on createdAt reports the mismatch on its first AddItem or Fetch.
+func (s *TimeSeries[T]) SetScoreUnit(unit time.Duration) error {
+	switch unit {
+	case time.Second, time.Millisecond, time.Microsecond:
+	default:
+		return fmt.Errorf("redifu: score unit must be time.Second, time.Millisecond or time.Microsecond, got %v", unit)
+	}
+	if unit != time.Millisecond && (s.sorted.scorer.kind == scoreFromTime || s.sorted.scorer.kind == scoreFromTimePtr) {
+		return fmt.Errorf("redifu: sorting reference %q is a time and is scored in milliseconds — set an int64 reference to count in %v", s.sorted.scorer.reference, unit)
+	}
+	s.unit = unit
+	return nil
+}
+
+// checkUnit reports a score unit that cannot apply: one other than milliseconds on a
+// series still scored by createdAt.
+func (s *TimeSeries[T]) checkUnit() error {
+	if s.unit != time.Millisecond && s.sorted.scorer.kind != scoreFromInt64 {
+		return fmt.Errorf("redifu: score unit %v needs an int64 sorting reference — call SetSortingReference", s.unit)
+	}
+	return nil
+}
+
+// instantOf turns a score back into the instant it stands for.
+func (s *TimeSeries[T]) instantOf(score float64) time.Time {
+	value := int64(score)
+	switch s.unit {
+	case time.Second:
+		return time.Unix(value, 0).UTC()
+	case time.Microsecond:
+		return time.UnixMicro(value).UTC()
+	}
+	return time.UnixMilli(value).UTC()
+}
+
+// scoreAt turns an instant into the score that stands for it, truncated to the unit.
+func (s *TimeSeries[T]) scoreAt(instant time.Time) int64 {
+	switch s.unit {
+	case time.Second:
+		return instant.Unix()
+	case time.Microsecond:
+		return instant.UnixMicro()
+	}
+	return instant.UnixMilli()
 }
 
 func (s *TimeSeries[T]) SetSelfHeal(selfHeal bool) {
@@ -95,6 +165,10 @@ func (s *TimeSeries[T]) WithPipeline(pipe redis.Pipeliner) *TimeSeriesWithPipeli
 }
 
 func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) (bool, error) {
+	if err := s.checkUnit(); err != nil {
+		return false, err
+	}
+
 	itemScore, errGetScore := s.sorted.scorer.score(item)
 	if errGetScore != nil {
 		return false, errGetScore
@@ -105,9 +179,7 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		return false, errKey
 	}
 
-	itemTime := time.UnixMilli(int64(itemScore)).UTC()
-
-	covered, errCovered := s.Covers(ctx, itemTime, keyParams...)
+	covered, errCovered := s.Covers(ctx, s.instantOf(itemScore), keyParams...)
 	if errCovered != nil {
 		return false, errCovered
 	}
@@ -449,6 +521,9 @@ func (f *fetchTimeSeriesBuilder[T]) Exec(ctx context.Context) ([]T, bool, error)
 	if !f.lowerbound.Before(f.upperbound) {
 		return nil, false, fmt.Errorf("redifu: invalid range: lowerbound (%s) must be less than upperbound (%s)", f.lowerbound.Format(time.RFC3339), f.upperbound.Format(time.RFC3339))
 	}
+	if err := f.timeSeries.checkUnit(); err != nil {
+		return nil, false, err
+	}
 
 	gaps, errFindGaps := f.timeSeries.FindGap(ctx, f.lowerbound, f.upperbound, f.keyParams...)
 	if errFindGaps != nil {
@@ -459,10 +534,11 @@ func (f *fetchTimeSeriesBuilder[T]) Exec(ctx context.Context) ([]T, bool, error)
 	}
 
 	// processorArgs is forwarded with ... — without it the consumer's arguments arrive
-	// wrapped in one more layer of slice than they passed.
+	// wrapped in one more layer of slice than they passed. The bounds are turned into
+	// scores in the series' unit; they used to be milliseconds whatever the scores were.
 	result, errFetch := f.timeSeries.sorted.Fetch(Descending).
 		WithParams(f.keyParams...).
-		WithRange(f.lowerbound.UnixMilli(), f.upperbound.UnixMilli()).
+		WithRange(f.timeSeries.scoreAt(f.lowerbound), f.timeSeries.scoreAt(f.upperbound)).
 		WithProcessor(f.processor, f.processorArgs...).
 		Exec(ctx)
 	if errFetch != nil {

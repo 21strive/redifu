@@ -410,6 +410,29 @@ reads as a gap and is seeded again.
 Your seeder can drop the "apply `SetExpiration` on the first non-empty seed" step — it is
 harmless if kept. Enqueue `AddSegment` after the `IngestItem` calls of its range.
 
+## 22. TimeSeries.SetScoreUnit
+
+An addition; the default keeps the old behaviour.
+
+`TimeSeries` read every `int64` score as Unix milliseconds — both when it looked for the
+segment covering an item and when it turned the bounds of `Fetch` into a score range. A
+column of Unix seconds (`start_time`) put every row in January 1970: outside every segment,
+outside every range, and `Fetch` answered "no items, nothing to seed".
+
+```go
+if err := series.SetSortingReference("StartTime"); err != nil { ... } // int64, Unix seconds
+if err := series.SetScoreUnit(time.Second); err != nil { ... }
+```
+
+| New | |
+|---|---|
+| `TimeSeries.SetScoreUnit(unit time.Duration) error` | `time.Second`, `time.Millisecond` (default) or `time.Microsecond`: what an `int64` sorting reference counts since the epoch. `Fetch` bounds are truncated to the unit and stay inclusive |
+
+A `time.Time` reference is always scored in milliseconds: `SetScoreUnit` refuses another unit
+while one is the reference, `SetSortingReference` refuses a time field while another unit is
+set, and a series left on `createdAt` with another unit reports it on the first `AddItem` or
+`Fetch`. Segments, `FindGap` and `Scan` stay in milliseconds whatever the unit.
+
 ---
 
 ## Checklist

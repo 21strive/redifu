@@ -268,3 +268,199 @@ func TestTimeSeriesIndexGetsATTLWhateverTheSeedOrder(t *testing.T) {
 		t.Fatalf("index TTL = %v (%v), want one — the index would never expire", ttl, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D — an int64 score counts the unit the series is told it counts
+// ---------------------------------------------------------------------------
+
+func secondsSeries(t *testing.T, newClient clientFactory) (*TimeSeries[*BookingSeconds], *Base[*BookingSeconds], context.Context) {
+	t.Helper()
+	client := newClient(t)
+	base := mustBase[*BookingSeconds](t, client, "booking-s:%s", baseTTL)
+	series := mustTimeSeries[*BookingSeconds](t, client, base, "cal-s:%s", indexTTL)
+	if err := series.SetSortingReference("StartTime"); err != nil {
+		t.Fatalf("SetSortingReference: %v", err)
+	}
+	if err := series.SetScoreUnit(time.Second); err != nil {
+		t.Fatalf("SetScoreUnit: %v", err)
+	}
+	return series, base, context.Background()
+}
+
+func newSecondsBooking(t *testing.T, at time.Time) *BookingSeconds {
+	t.Helper()
+	booking := &BookingSeconds{}
+	InitRecord(booking)
+	booking.StartTime = at.Unix()
+	return booking
+}
+
+func TestTimeSeriesReadsSecondsScoresInSeconds(t *testing.T) {
+	scenarioTimeSeriesReadsSecondsScoresInSeconds(t, miniClient)
+}
+
+func scenarioTimeSeriesReadsSecondsScoresInSeconds(t *testing.T, newClient clientFactory) {
+	series, base, ctx := secondsSeries(t, newClient)
+
+	seeded := newSecondsBooking(t, jan1.Add(48*time.Hour))
+	pipe := series.redis.Pipeline()
+	if err := base.WithPipeline(pipe).Set(ctx, seeded); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := series.IngestItem(ctx, pipe, seeded, "o1"); err != nil {
+		t.Fatalf("IngestItem: %v", err)
+	}
+	if err := series.AddSegment(ctx, pipe, jan1, feb1, "o1"); err != nil {
+		t.Fatalf("AddSegment: %v", err)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	// The index holds the seconds as they are...
+	stored, err := series.redis.ZScore(ctx, indexKey("cal-s:o1"), seeded.GetRandId()).Result()
+	if err != nil || int64(stored) != seeded.StartTime {
+		t.Fatalf("stored score = %v (%v), want the Unix seconds %d", stored, err, seeded.StartTime)
+	}
+
+	// ...and Fetch turns its bounds into seconds to find them.
+	items, needsSeed, err := series.Fetch(jan1, feb1).WithParams("o1").Exec(ctx)
+	if err != nil || needsSeed || len(items) != 1 {
+		t.Fatalf("Fetch January = %d items, needsSeed = %v, %v; want the seeded booking", len(items), needsSeed, err)
+	}
+
+	// AddItem finds the segment that covers a seconds score.
+	later := newSecondsBooking(t, jan1.Add(20*24*time.Hour))
+	if err := series.AddItem(ctx, later, "o1"); err != nil {
+		t.Fatalf("AddItem inside January = %v, want it ingested", err)
+	}
+	march := newSecondsBooking(t, mar1.Add(time.Hour))
+	if err := series.AddItem(ctx, march, "o1"); !errors.Is(err, ErrNotIngested) {
+		t.Fatalf("AddItem in March = %v, want ErrNotIngested", err)
+	}
+
+	// The upper bound is inclusive, in whole seconds.
+	items, _, err = series.Fetch(jan1, jan1.Add(48*time.Hour)).WithParams("o1").Exec(ctx)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("Fetch up to the booking's own second = %d items, %v; want 1", len(items), err)
+	}
+	items, _, err = series.Fetch(jan1, jan1.Add(48*time.Hour-time.Second)).WithParams("o1").Exec(ctx)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("Fetch up to the second before = %d items, %v; want 0", len(items), err)
+	}
+}
+
+func TestTimeSeriesScoreUnitsOtherThanSeconds(t *testing.T) {
+	ctx := context.Background()
+	_, client := newTestRedis(t)
+
+	for _, tc := range []struct {
+		unit  time.Duration
+		value func(time.Time) int64
+	}{
+		{time.Millisecond, func(at time.Time) int64 { return at.UnixMilli() }},
+		{time.Microsecond, func(at time.Time) int64 { return at.UnixMicro() }},
+	} {
+		base := mustBase[*BookingSeconds](t, client, "b-"+tc.unit.String()+":%s", baseTTL)
+		series := mustTimeSeries[*BookingSeconds](t, client, base, "s-"+tc.unit.String()+":%s", indexTTL)
+		if err := series.SetSortingReference("StartTime"); err != nil {
+			t.Fatalf("SetSortingReference: %v", err)
+		}
+		if err := series.SetScoreUnit(tc.unit); err != nil {
+			t.Fatalf("SetScoreUnit(%v): %v", tc.unit, err)
+		}
+
+		booking := &BookingSeconds{}
+		InitRecord(booking)
+		booking.StartTime = tc.value(jan1.Add(36 * time.Hour))
+
+		pipe := client.Pipeline()
+		if err := series.AddSegment(ctx, pipe, jan1, feb1, "o1"); err != nil {
+			t.Fatalf("AddSegment: %v", err)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+		if err := series.AddItem(ctx, booking, "o1"); err != nil {
+			t.Fatalf("%v: AddItem = %v, want it ingested", tc.unit, err)
+		}
+		items, needsSeed, err := series.Fetch(jan1, feb1).WithParams("o1").Exec(ctx)
+		if err != nil || needsSeed || len(items) != 1 {
+			t.Fatalf("%v: Fetch = %d items, needsSeed = %v, %v", tc.unit, len(items), needsSeed, err)
+		}
+	}
+}
+
+func TestTimeSeriesScoreUnitIsValidated(t *testing.T) {
+	ctx := context.Background()
+	_, client := newTestRedis(t)
+
+	// Only units an int64 can count exactly since the epoch.
+	seconds := mustTimeSeries[*BookingSeconds](t, client, mustBase[*BookingSeconds](t, client, "v1:%s", baseTTL), "v1s:%s", indexTTL)
+	for _, unit := range []time.Duration{time.Minute, time.Nanosecond, 0, -time.Second} {
+		if err := seconds.SetScoreUnit(unit); err == nil {
+			t.Fatalf("SetScoreUnit(%v) was accepted", unit)
+		}
+	}
+
+	// A time field is scored in milliseconds, whichever setter comes second.
+	timed := mustTimeSeries[*Booking](t, client, mustBase[*Booking](t, client, "v2:%s", baseTTL), "v2s:%s", indexTTL)
+	if err := timed.SetSortingReference("StartAt"); err != nil {
+		t.Fatalf("SetSortingReference: %v", err)
+	}
+	if err := timed.SetScoreUnit(time.Second); err == nil {
+		t.Fatal("seconds were accepted for a time.Time sorting reference")
+	}
+	if err := seconds.SetScoreUnit(time.Second); err != nil {
+		t.Fatalf("SetScoreUnit before the reference: %v", err)
+	}
+	if err := seconds.SetSortingReference("UpdatedAt"); err == nil {
+		t.Fatal("a time field was accepted as the reference of a series counting seconds")
+	}
+
+	// Left on createdAt, the mismatch surfaces on first use rather than as an empty read.
+	if _, _, err := seconds.Fetch(jan1, feb1).WithParams("o1").Exec(ctx); err == nil {
+		t.Fatal("Fetch accepted a seconds unit on a series scored by createdAt")
+	}
+	if err := seconds.AddItem(ctx, newSecondsBooking(t, jan1), "o1"); err == nil || errors.Is(err, ErrNotIngested) {
+		t.Fatalf("AddItem = %v, want the unit mismatch reported", err)
+	}
+
+	// Once the reference is an int64, both orders work.
+	if err := seconds.SetSortingReference("StartTime"); err != nil {
+		t.Fatalf("SetSortingReference(StartTime): %v", err)
+	}
+	if _, _, err := seconds.Fetch(jan1, feb1).WithParams("o1").Exec(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+}
+
+func TestTimeSeriesDefaultUnitIsStillMilliseconds(t *testing.T) {
+	ctx := context.Background()
+	_, client := newTestRedis(t)
+	base := mustBase[*BookingSeconds](t, client, "ms:%s", baseTTL)
+	series := mustTimeSeries[*BookingSeconds](t, client, base, "msi:%s", indexTTL)
+	if err := series.SetSortingReference("StartTime"); err != nil {
+		t.Fatalf("SetSortingReference: %v", err)
+	}
+
+	pipe := client.Pipeline()
+	if err := series.AddSegment(ctx, pipe, jan1, feb1, "o1"); err != nil {
+		t.Fatalf("AddSegment: %v", err)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	// Without SetScoreUnit an int64 still counts milliseconds, as before.
+	booking := &BookingSeconds{}
+	InitRecord(booking)
+	booking.StartTime = jan1.Add(time.Hour).UnixMilli()
+	if err := series.AddItem(ctx, booking, "o1"); err != nil {
+		t.Fatalf("AddItem of a millisecond score = %v", err)
+	}
+	items, _, err := series.Fetch(jan1, feb1).WithParams("o1").Exec(ctx)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("Fetch = %d items, %v; want 1", len(items), err)
+	}
+}

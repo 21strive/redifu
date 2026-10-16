@@ -109,6 +109,13 @@ if err := timeline.SetSortingReference("UpdatedAt"); err != nil { ... }
 
 If `sortingReference` is set, the same field must be the `ORDER BY` column in the SQL used to seed the collection, and the same field the cursor reference is read from.
 
+`TimeSeries` also needs to know what an `int64` reference counts, because it converts in both
+directions — a score into the instant whose segment must cover it, and the bounds of
+`Fetch` into a score range. `SetScoreUnit(time.Second | time.Millisecond | time.Microsecond)`
+sets it; the default is milliseconds. A `time.Time` reference is always scored in
+milliseconds, so another unit is refused with a time reference, and reported on first use
+of a series left on `createdAt`. Segments themselves are always recorded in milliseconds.
+
 ---
 
 ## Relation — Singleton Mechanism
@@ -341,7 +348,7 @@ original flow, whose handler seeded the first page only.
 1. **Collections never delete `Base` keys.** `RemoveItem` only removes a member from one index; `Purge` only drops the index and its markers. Deleting the entity itself is `Base.Del`, and it is deliberate: any other index still holding that randId will come back short until it is re-seeded or purged. Prefer a leak that expires on its own over a hole that does not.
 2. **Functions that receive `pipe` must not call `pipe.Exec`.** See Pipeline Discipline above.
 3. **A relation field must be tagged `json:"-"`** — without it, writing a fetched item back to `Base` bakes a copy of the related entity into the item key and breaks the singleton permanently.
-4. **Scores in sorted sets are always numeric:** Unix timestamp in milliseconds or `int64`. No other types.
+4. **Scores in sorted sets are always numeric:** Unix timestamp in milliseconds or `int64`. No other types. A `TimeSeries` reads an `int64` score in the unit set with `SetScoreUnit` (milliseconds unless told otherwise).
 5. **`Relate` returns an error** — always handle it at startup, never ignore it.
 6. **`AddItem` places an item into an index; it does not update the item.** It writes the item only when `Base` does not hold it yet, but always refreshes its TTL — so an index can never outlive the items it points at. To change an item's contents, use `Base.Set`.
 7. **An outcome is reported, never swallowed.** `AddItem` returns `ErrNotIngested` when it stored the item but did not index it. `Count` returns an error rather than folding a Redis failure into `0`. A `Sorted` or `Page` read reports the members it dropped because their item was gone (`ExecReport`), the way a Timeline read reports `Dangling()`. A randId cursor that has left the index returns `ErrResetPagination` rather than silently serving page one; a position cursor (`FetchFrom`) needs no such escape, because the page after a position exists whether or not its member does. Page position is read from the index, not from how many items survived hydration.

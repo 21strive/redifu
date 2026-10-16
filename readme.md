@@ -190,6 +190,9 @@ items, needsSeed, err := txTimeSeries.
     Exec(ctx)
 ```
 
+A series sorted by an `int64` column has to be told what the column counts —
+`SetScoreUnit(time.Second)` for Unix seconds; milliseconds is the default.
+
 ---
 
 ## Relation — Singleton Behavior
