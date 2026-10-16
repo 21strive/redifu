@@ -285,6 +285,7 @@ next := output.NextCursor().String()                            // hand it to th
 | `Timeline.FetchFrom(cursor)` | the page strictly after the position, in ZREVRANGE (descending) or ZRANGE (ascending) order, whether or not its member is still in the index; never `ErrResetPagination` |
 | `FetchOutput.NextCursor()` | where this page ends, read from the index; an empty page ends where it started |
 | `Timeline.Score(item)` | the score the index stores for an item — build cursors and database keysets from it |
+| `Timeline.Tail(ctx, params...) (Cursor, bool, error)` | the position of the index's last member in the timeline's order, `false` when empty; where a top-up seed continues from |
 | `ErrInvalidCursor` | a token `ParseCursor` cannot read, or a cursor whose score is NaN |
 
 `NextCursor()` is filled by every Timeline read — `Fetch`, `FetchFrom` and `FetchAll` — so

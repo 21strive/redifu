@@ -180,6 +180,43 @@ func (cr *Timeline[T]) Count(ctx context.Context, keyParams ...string) (int64, e
 	return cr.sortedSetClient.Count(ctx, keyParams...)
 }
 
+// Tail returns the position of the last member of the index in this timeline's order:
+// for a Descending timeline the lowest score and, among the members sharing it, the
+// smallest member — the last element ZREVRANGE returns; for an Ascending one the last
+// element of ZRANGE. It reports false when the index holds nothing. One round trip.
+//
+// It is where a top-up seed continues from. A page that ran past the end of the index
+// ends at the tail, but a client's cursor can lie beyond it — the index may have been
+// purged or have expired while the client was deep in the feed — and seeding from such
+// a cursor would leave a gap between the tail and the cursor that no later read fills.
+func (cr *Timeline[T]) Tail(ctx context.Context, keyParams ...string) (Cursor, bool, error) {
+	key, err := cr.sortedSetClient.key(keyParams)
+	if err != nil {
+		return Cursor{}, false, err
+	}
+
+	// ZRANGE order is the reverse of ZREVRANGE order, member ties included, so the last
+	// element of a descending read is the first element of an ascending one.
+	rank := int64(0)
+	if cr.direction == Ascending {
+		rank = -1
+	}
+
+	result, err := cr.client.ZRangeWithScores(ctx, key, rank, rank).Result()
+	if err != nil {
+		return Cursor{}, false, err
+	}
+	if len(result) == 0 {
+		return Cursor{}, false, nil
+	}
+
+	member, ok := result[0].Member.(string)
+	if !ok {
+		return Cursor{}, false, fmt.Errorf("redifu: unexpected member type %T", result[0].Member)
+	}
+	return Cursor{Score: result[0].Score, Member: member}, true, nil
+}
+
 func (cr *Timeline[T]) GetItemPerPage() int64 {
 	return cr.itemPerPage
 }

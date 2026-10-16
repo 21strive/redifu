@@ -75,6 +75,8 @@ func TestRealRedis(t *testing.T) {
 		"NextCursorAgreesAcrossFetchPaths":                   scenarioNextCursorAgreesAcrossFetchPaths,
 		"FetchFromReportsDanglingMembersAndHasMoreFromIndex": scenarioFetchFromReportsDanglingMembersAndHasMoreFromTheIndex,
 		"FetchFromWalksAThousandTies":                        scenarioFetchFromWalksAThousandTies,
+		"TailIsTheLastMemberInTheTimelinesOrder":             scenarioTailIsTheLastMemberInTheTimelinesOrder,
+		"TailOfAnEmptyIndex":                                 scenarioTailOfAnEmptyIndex,
 	}
 
 	for name, scenario := range scenarios {
