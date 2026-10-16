@@ -179,6 +179,9 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		return false, errKey
 	}
 
+	// The one read this path makes outside the caller's pipeline, before anything is
+	// enqueued. The segment store sits under an untagged key, in another cluster slot
+	// than the index, so no script could read it and write the index atomically.
 	covered, errCovered := s.Covers(ctx, s.instantOf(itemScore), keyParams...)
 	if errCovered != nil {
 		return false, errCovered
@@ -223,9 +226,9 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 }
 
 // AddItem stores the item in Base if it is not there yet, always refreshes its TTL, and
-// places it into the series when its timestamp falls inside a seeded segment — even when
-// every item seeded there so far was zero. It returns ErrNotIngested when the timestamp
-// is outside every seeded range, or the series is not seeded at all.
+// places it into the series when its timestamp falls inside a seeded segment — also when
+// that range was seeded while it held no rows. It returns ErrNotIngested when the
+// timestamp is outside every seeded range, or the series is not seeded at all.
 func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
 	ingested, err := s.addItem(ctx, nil, item, keyParams...)
 	if err != nil {
