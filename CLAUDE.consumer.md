@@ -35,10 +35,11 @@ You always construct a `Base[T]` first, then pass it into whichever collection y
 ### What each structure is for
 
 - **`Timeline[T]`** — pagination in *timeline form* (infinite scroll / "load more"). It paginates
-  with a **`randId` cursor**, not page numbers: each page hands back a `validLastId` the client
-  sends to fetch the next page. This is the only structure whose seeder takes a
-  **`subtraction`** parameter (see below) — because it stitches partial pages together as the
-  user scrolls.
+  with a **cursor**, not page numbers: each page hands back a `NextCursor()` — the score and
+  member of its last item — that the client sends to fetch the next page. The page after a
+  cursor is read by position, so it exists even when that item has since left the index.
+  This is the only structure whose seeder takes a **`subtraction`** parameter (see below) —
+  because it stitches partial pages together as the user scrolls.
 
 - **`Sorted[T]`** — best for lists that are **near-finite and rarely change**, because a `Sorted`
   fetch returns the **entire collection in one go** (no pagination). Think leaderboards,
@@ -182,7 +183,8 @@ func InitRedis(redisClient redis.UniversalClient) {
 |-------|-------|------------|
 | `redifu.ErrNotFound` | the item key is not in Base | treat as a cache miss; seed or 404 |
 | `redifu.ErrNotIngested` | `AddItem` stored the item and refreshed its TTL, but did not index it — the collection is not seeded, or the item is outside the window this index holds | usually ignore; it is not a failure |
-| `redifu.ErrResetPagination` | none of the cursors you passed are in the index any more | tell the client to restart the feed |
+| `redifu.ErrResetPagination` | `Fetch(lastRandIds)` only: none of the randId cursors you passed are in the index any more | tell the client to restart the feed — or move to `FetchFrom`, which never returns it |
+| `redifu.ErrInvalidCursor` | `ParseCursor` got a token `Cursor.String` did not produce, or `FetchFrom` a cursor whose score is not a number | answer the request with a client error |
 | `redifu.ErrRelationNotTransient` | a relation field is missing `json:"-"` | fix the tag, then re-save affected entities |
 | `redifu.ErrScoreOutOfRange` | an `int64` sorting reference is beyond 2^53 | do not sort by snowflake ids |
 

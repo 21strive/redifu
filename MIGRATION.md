@@ -264,6 +264,34 @@ Two things do change if you adopt `Record`:
   format; a randId is a public handle that ends up in URLs, so it is no longer drawn
   from the `math/rand` global source.
 
+## 15. Position cursors for Timeline
+
+An addition; nothing existing changes behaviour.
+
+`Fetch(lastRandIds)` has to find the cursor's member in the index, so a client whose last
+item was deleted — or moved to another status tab — gets `ErrResetPagination` and starts
+over. `FetchFrom` reads by position instead:
+
+```go
+cursor, err := redifu.ParseCursor(r.URL.Query().Get("cursor")) // "" is the zero Cursor: page one
+output := timeline.FetchFrom(cursor).WithParams(userId).Exec(ctx)
+next := output.NextCursor().String()                            // hand it to the client
+```
+
+| New | |
+|---|---|
+| `type Cursor struct { Score float64; Member string }` | a position: the score and member of the last item seen |
+| `Cursor.IsZero()`, `Cursor.String()`, `ParseCursor(string)` | the zero Cursor reads page one and renders as `""`; `String`/`ParseCursor` round-trip exactly |
+| `Timeline.FetchFrom(cursor)` | the page strictly after the position, in ZREVRANGE (descending) or ZRANGE (ascending) order, whether or not its member is still in the index; never `ErrResetPagination` |
+| `FetchOutput.NextCursor()` | where this page ends, read from the index; an empty page ends where it started |
+| `Timeline.Score(item)` | the score the index stores for an item — build cursors and database keysets from it |
+| `ErrInvalidCursor` | a token `ParseCursor` cannot read, or a cursor whose score is NaN |
+
+`NextCursor()` is filled by every Timeline read — `Fetch`, `FetchFrom` and `FetchAll` — so
+clients can move from randId cursors to position cursors one request at a time. The randId
+cursor script now reads the page after the cursor's rank instead of re-reading its whole tie
+group; the pages it returns are unchanged.
+
 ---
 
 ## Checklist
@@ -277,5 +305,6 @@ Two things do change if you adopt `Record`:
 5. Replace `errors.Is(err, redis.Nil)` with `errors.Is(err, redifu.ErrNotFound)`.
 6. Take the error from `Count` and `SetSortingReference`.
 7. Switch "load more" from `Position() != LastPage` to `HasMore()`.
-8. Handle `ErrResetPagination` on the fetch output.
+8. Handle `ErrResetPagination` on the output of `Fetch(lastRandIds)` — or move the client to
+   position cursors (`FetchFrom`, `NextCursor`), which never send it back to page one.
 9. If you run Redis below 6.2, call `SetTouchOnRead(false)` on every `Base`.

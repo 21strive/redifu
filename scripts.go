@@ -88,42 +88,102 @@ return 0
 //	KEYS[1] sorted set
 //	ARGV[1] cursor member   ARGV[2] limit   ARGV[3] direction
 //
-// It anchors on the cursor's score rather than its rank. A rank cursor drifts: every
-// item added at the head of a descending timeline shifts every rank by one, so the
-// reader sees an item it has already seen. A score anchor is unaffected by inserts
-// outside the window. Members sharing the cursor's exact score are handled by widening
-// the window by the size of that tie group and skipping past the cursor inside it.
+// The cursor's rank is looked up inside the script, at the moment of the read, so it
+// cannot drift the way a rank handed to a client does: an item added at the head of a
+// descending timeline between two requests shifts every rank by one, but not the
+// member's own position. Members sharing the cursor's score keep their order, because
+// the read continues from the cursor's rank rather than from its score.
 //
-// Returns the page, or a nil reply when the cursor is no longer in the index.
+// Returns false when the cursor is no longer in the index, otherwise the cursor's score
+// followed by the page as member/score pairs:
+//
+//	{ cursorScore, member1, score1, member2, score2, ... }
 var timelineCursorScript = redis.NewScript(`
-local limit = tonumber(ARGV[2])
-local descending = ARGV[3] == 'desc'
 local cursor = ARGV[1]
+local limit = tonumber(ARGV[2])
 
 local score = redis.call('ZSCORE', KEYS[1], cursor)
 if not score then
   return false
 end
 
-local tied = redis.call('ZCOUNT', KEYS[1], score, score)
-local window
-if descending then
-  window = redis.call('ZREVRANGEBYSCORE', KEYS[1], score, '-inf', 'LIMIT', 0, limit + tied)
+local page
+if ARGV[3] == 'desc' then
+  local rank = redis.call('ZREVRANK', KEYS[1], cursor)
+  page = redis.call('ZREVRANGE', KEYS[1], rank + 1, rank + limit, 'WITHSCORES')
 else
-  window = redis.call('ZRANGEBYSCORE', KEYS[1], score, '+inf', 'LIMIT', 0, limit + tied)
+  local rank = redis.call('ZRANK', KEYS[1], cursor)
+  page = redis.call('ZRANGE', KEYS[1], rank + 1, rank + limit, 'WITHSCORES')
 end
 
-local page = {}
-local passed = false
-for i = 1, #window do
-  if passed then
-    page[#page + 1] = window[i]
-    if #page >= limit then
-      break
+table.insert(page, 1, score)
+return page
+`)
+
+// timelinePositionScript reads the page that follows a position — a score and a member —
+// in a Timeline's order, whether or not that member is still in the index.
+//
+//	KEYS[1] sorted set
+//	ARGV[1] score   ARGV[2] member   ARGV[3] limit   ARGV[4] direction
+//
+// Descending order is ZREVRANGE order: score descending, then member descending. The
+// page starts at the first member with a lower score, or with the same score and a
+// smaller member. Ascending order is ZRANGE order and the mirror image of it.
+//
+// The members sharing the cursor's score sit in one run of ranks, ordered by member.
+// The script counts the members before that run, then binary-searches the run for the
+// first member past the cursor, so a large tie group costs a few lookups rather than a
+// read of the whole group. One round trip whatever the shape of the index.
+//
+// Members are compared byte by byte, the order Redis keeps equal-score members in.
+// Lua's own '<' on strings goes through strcoll, which follows the server's LC_COLLATE
+// and would place "B" after "a" under most locales other than C.
+//
+// Returns the page as member/score pairs: { member1, score1, member2, score2, ... }.
+var timelinePositionScript = redis.NewScript(`
+local key = KEYS[1]
+local score = ARGV[1]
+local member = ARGV[2]
+local limit = tonumber(ARGV[3])
+local descending = ARGV[4] == 'desc'
+
+local function less(a, b)
+  local la, lb = #a, #b
+  for i = 1, math.min(la, lb) do
+    local x, y = string.byte(a, i), string.byte(b, i)
+    if x ~= y then
+      return x < y
     end
-  elseif window[i] == cursor then
-    passed = true
+  end
+  return la < lb
+end
+
+local first
+if descending then
+  first = redis.call('ZCOUNT', key, '(' .. score, '+inf')
+else
+  first = redis.call('ZCOUNT', key, '-inf', '(' .. score)
+end
+local tied = redis.call('ZCOUNT', key, score, score)
+
+local lo, hi = first, first + tied
+while lo < hi do
+  local mid = math.floor((lo + hi) / 2)
+  local past
+  if descending then
+    past = less(redis.call('ZREVRANGE', key, mid, mid)[1], member)
+  else
+    past = less(member, redis.call('ZRANGE', key, mid, mid)[1])
+  end
+  if past then
+    hi = mid
+  else
+    lo = mid + 1
   end
 end
-return page
+
+if descending then
+  return redis.call('ZREVRANGE', key, lo, lo + limit - 1, 'WITHSCORES')
+end
+return redis.call('ZRANGE', key, lo, lo + limit - 1, 'WITHSCORES')
 `)

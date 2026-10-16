@@ -238,6 +238,38 @@ Scripts are sent with `EVAL`, not `EVALSHA`: a pipelined `EVALSHA` cannot fall b
 the script is not cached, because `NOSCRIPT` only surfaces at `Exec`. Every key a script
 touches must share a slot — hence the hash tag above.
 
+Two rules for every script:
+
+- **Compare members byte by byte.** Redis orders members that share a score by their
+  bytes, but Lua's `<` on strings inside Redis goes through `strcoll`, which follows the
+  server's `LC_COLLATE` — under `en_US` it puts `"B"` after `"a"`. Use the `less` helper
+  in `timelinePositionScript`, never `<`, on members.
+- **Run the suite against a real server whenever a script changes.** miniredis runs
+  scripts on gopher-lua, where `<` is byte-wise, so it cannot catch the rule above.
+  Scenarios that exercise a script take a `clientFactory` and are listed in
+  `TestRealRedis` (`realredis_test.go`), which runs them against `REDIFU_REDIS_ADDR`:
+
+  ```bash
+  LC_ALL=en_US.utf8 redis-server --port 6399 --save '' &
+  REDIFU_REDIS_ADDR=127.0.0.1:6399 go test -run TestRealRedis -v ./...
+  ```
+
+## Timeline cursors
+
+Two kinds, both answered by one script round trip:
+
+| Cursor | Read with | When its member left the index |
+|---|---|---|
+| randId (`ValidLastId()`) | `Fetch(lastRandIds)` | `ErrResetPagination` — the client starts over |
+| position (`NextCursor()`, a `Cursor`) | `FetchFrom(cursor)` | nothing: the page after a position exists without its member |
+
+A position is `(score, member)` in the timeline's order: score then member, both
+descending for `Descending` (ZREVRANGE order), both ascending for `Ascending` (ZRANGE
+order). `timelinePositionScript` counts the members before the cursor's score, then
+binary-searches the run of members sharing that score — so a tie group of thousands costs
+a handful of lookups. Scores cross into Lua through `formatScore`, which renders any
+float64 exactly; `Timeline.Score(item)` is the one way to compute the score of an item.
+
 ---
 
 ## Seeding
@@ -280,7 +312,7 @@ between what Redis already holds and `itemPerPage`, subtracted from the SQL `LIM
 4. **Scores in sorted sets are always numeric:** Unix timestamp in milliseconds or `int64`. No other types.
 5. **`Relate` returns an error** — always handle it at startup, never ignore it.
 6. **`AddItem` places an item into an index; it does not update the item.** It writes the item only when `Base` does not hold it yet, but always refreshes its TTL — so an index can never outlive the items it points at. To change an item's contents, use `Base.Set`.
-7. **An outcome is reported, never swallowed.** `AddItem` returns `ErrNotIngested` when it stored the item but did not index it. `Count` returns an error rather than folding a Redis failure into `0`. A cursor that has left the index returns `ErrResetPagination` rather than silently serving page one. Page position is read from the index, not from how many items survived hydration.
+7. **An outcome is reported, never swallowed.** `AddItem` returns `ErrNotIngested` when it stored the item but did not index it. `Count` returns an error rather than folding a Redis failure into `0`. A randId cursor that has left the index returns `ErrResetPagination` rather than silently serving page one; a position cursor (`FetchFrom`) needs no such escape, because the page after a position exists whether or not its member does. Page position is read from the index, not from how many items survived hydration.
 8. **Errors are redifu's own.** `ErrNotFound`, never `redis.Nil`, crosses the public API.
 
 ---

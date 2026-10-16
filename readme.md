@@ -82,15 +82,25 @@ postTimeline := redifu.NewTimeline[Post](
 // Add item
 postTimeline.AddItem(ctx, post, userRandId)
 
-// Fetch — lastRandIds is an array to tolerate items deleted from cache
-output   := postTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
+// Fetch the page after a position cursor — the zero Cursor reads page one
+cursor, err := redifu.ParseCursor(r.URL.Query().Get("cursor")) // "" → zero Cursor
+output   := postTimeline.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
 items    := output.Items()
-nextId   := output.ValidLastId()   // send to client, used as the next cursor
-position := output.Position()      // FirstPage / MiddlePage / LastPage
+next     := output.NextCursor().String() // send to client, it comes back as ?cursor=
+hasMore  := output.HasMore()             // read from the index — drive "load more" from this
 
 // Remove item
 postTimeline.RemoveItem(ctx, post, userRandId)
 ```
+
+A `Cursor` is a position — the score and member of the last item the client saw — and the
+page after it exists whether or not that item is still in the index. Deleting an item, or
+moving it to another status, never sends a client back to page one.
+
+The older randId cursor still works: `Fetch(lastRandIds)` reads the page after the newest of
+those randIds still in the index, and returns `ErrResetPagination` when none of them is.
+`Timeline.Score(item)` gives the score the index stores for an item, for building cursors
+and database keysets that agree with it.
 
 ---
 

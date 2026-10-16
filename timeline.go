@@ -3,6 +3,9 @@ package redifu
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -11,6 +14,7 @@ import (
 type FetchOutput[T Blueprint] struct {
 	items       []T
 	validLastId string
+	nextCursor  Cursor
 	position    string
 	firstPage   bool
 	hasMore     bool
@@ -22,9 +26,20 @@ func (f FetchOutput[T]) Items() []T {
 	return f.items
 }
 
-// ValidLastId is the cursor to hand back for the next page.
+// ValidLastId is the randId cursor to hand back for the next page, for Fetch.
 func (f FetchOutput[T]) ValidLastId() string {
 	return f.validLastId
+}
+
+// NextCursor is the position this page ends at: the score and member of its last member,
+// as the index holds them. Hand it to the client and pass it to FetchFrom for the next
+// page. It is read from the index, so a member whose item has expired out of Base still
+// moves the cursor past it.
+//
+// An empty page ends where it started — at the cursor it was read after, or the zero
+// Cursor for a first page — so following NextCursor never moves a client backwards.
+func (f FetchOutput[T]) NextCursor() Cursor {
+	return f.nextCursor
 }
 
 // Position is FirstPage, MiddlePage or LastPage. A page that is both the first and the
@@ -143,6 +158,14 @@ func (cr *Timeline[T]) SetSortingReference(sortingReference string) error {
 	}
 	cr.scorer = resolved
 	return nil
+}
+
+// Score returns the score this timeline stores for item: its sorting reference as the
+// sorted set holds it — Unix milliseconds for a time field, the value itself for an
+// int64. Build cursors and database keysets from it, so that they compare exactly what
+// the index sorts by.
+func (cr *Timeline[T]) Score(item T) (float64, error) {
+	return cr.scorer.score(item)
 }
 
 func (cr *Timeline[T]) SetSelfHeal(selfHeal bool) {
@@ -358,10 +381,34 @@ func (cr *Timeline[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyPar
 	return cr.clearMarker(ctx, pipe, markerBlankPage, keyParams)
 }
 
+// Fetch reads the page that follows a randId cursor: the first of lastRandId, newest
+// first, that is still a member of the index. When none of them is, it returns
+// ErrResetPagination. An empty lastRandId reads the first page.
 func (cr *Timeline[T]) Fetch(lastRandId []string) *timelineFetchBuilder[T] {
 	return &timelineFetchBuilder[T]{
 		timeline:    cr,
 		lastRandIds: appendParams(nil, lastRandId...),
+	}
+}
+
+// FetchFrom reads the page that follows cursor in this timeline's order — score
+// descending then member descending for a Descending timeline (ZREVRANGE order), score
+// ascending then member ascending for an Ascending one (ZRANGE order) — whether or not
+// the cursor's member is still in the index. An item that left the index does not move
+// the position, so the client carries on where it was instead of starting over: unlike
+// Fetch, FetchFrom never returns ErrResetPagination.
+//
+// The zero Cursor reads the first page. An empty Member sorts below every member that
+// shares the cursor's score, so Cursor{Score: s} reads the items scored below s on a
+// Descending timeline — everything older than s — and from s upwards on an Ascending one.
+//
+// Everything else — the one-extra-member HasMore check, hydration, relations, the
+// processor, self-healing — is the same as Fetch.
+func (cr *Timeline[T]) FetchFrom(cursor Cursor) *timelineFetchBuilder[T] {
+	return &timelineFetchBuilder[T]{
+		timeline:     cr,
+		position:     cursor,
+		fromPosition: true,
 	}
 }
 
@@ -397,6 +444,8 @@ func (cr *Timeline[T]) Purge(ctx context.Context, keyParams ...string) error {
 type timelineFetchBuilder[T Blueprint] struct {
 	timeline      *Timeline[T]
 	lastRandIds   []string
+	position      Cursor
+	fromPosition  bool
 	params        []string
 	processor     func(*T, []interface{})
 	processorArgs []interface{}
@@ -414,19 +463,20 @@ func (b *timelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}
 	return b
 }
 
-// cursorPage asks Redis for the page that follows one of the supplied cursors. The
-// candidates are tried newest first; the first one still present in the index wins.
-func (b *timelineFetchBuilder[T]) cursorPage(ctx context.Context, key string, limit int64) ([]string, bool, error) {
+// cursorPage asks Redis for the page that follows one of the supplied randId cursors.
+// The candidates are tried newest first; the first one still present in the index wins,
+// and is returned as a Cursor so an empty page can still report where it ended.
+func (b *timelineFetchBuilder[T]) cursorPage(ctx context.Context, key string, limit int64) ([]string, []float64, Cursor, bool, error) {
 	for i := len(b.lastRandIds) - 1; i >= 0; i-- {
-		cursor := b.lastRandIds[i]
-		if cursor == "" {
+		candidate := b.lastRandIds[i]
+		if candidate == "" {
 			continue
 		}
 
 		result, err := timelineCursorScript.Eval(
 			ctx, b.timeline.client,
 			[]string{key},
-			cursor, limit, b.timeline.direction,
+			candidate, limit, b.timeline.direction,
 		).StringSlice()
 
 		if err != nil {
@@ -434,13 +484,44 @@ func (b *timelineFetchBuilder[T]) cursorPage(ctx context.Context, key string, li
 				// This cursor is no longer a member of the index. Try an older one.
 				continue
 			}
-			return nil, false, err
+			return nil, nil, Cursor{}, false, err
+		}
+		if len(result) == 0 {
+			return nil, nil, Cursor{}, false, errors.New("redifu: cursor script returned no cursor score")
 		}
 
-		return result, true, nil
+		cursorScore, errScore := strconv.ParseFloat(result[0], 64)
+		if errScore != nil {
+			return nil, nil, Cursor{}, false, fmt.Errorf("redifu: unreadable cursor score %q: %w", result[0], errScore)
+		}
+
+		members, scores, errPairs := scoredMembers(result[1:])
+		if errPairs != nil {
+			return nil, nil, Cursor{}, false, errPairs
+		}
+
+		return members, scores, Cursor{Score: cursorScore, Member: candidate}, true, nil
 	}
 
-	return nil, false, nil
+	return nil, nil, Cursor{}, false, nil
+}
+
+// positionPage asks Redis for the page that follows the builder's Cursor, in one script.
+func (b *timelineFetchBuilder[T]) positionPage(ctx context.Context, key string, limit int64) ([]string, []float64, error) {
+	if math.IsNaN(b.position.Score) {
+		return nil, nil, fmt.Errorf("%w: the score is not a number", ErrInvalidCursor)
+	}
+
+	result, err := timelinePositionScript.Eval(
+		ctx, b.timeline.client,
+		[]string{key},
+		formatScore(b.position.Score), b.position.Member, limit, b.timeline.direction,
+	).StringSlice()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return scoredMembers(result)
 }
 
 func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
@@ -452,36 +533,49 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 	// One extra member tells us whether a further page exists without a second query.
 	limit := b.timeline.itemPerPage
 	var members []string
+	var scores []float64
 	var usedCursor bool
+	// after is the position this page was read after. An empty page ends there.
+	var after Cursor
 
 	switch {
 	case b.fetchAll:
-		found, err := b.timeline.sortedSetClient.rangeMembers(ctx, b.timeline.direction, 0, -1, false, b.params)
+		found, foundScores, err := b.timeline.sortedSetClient.rangeWithScores(ctx, b.timeline.direction, 0, -1, b.params)
 		if err != nil {
 			return &FetchOutput[T]{error: err}
 		}
-		members = found
+		members, scores = found, foundScores
+
+	case b.fromPosition && !b.position.IsZero():
+		found, foundScores, err := b.positionPage(ctx, key, limit+1)
+		if err != nil {
+			return &FetchOutput[T]{error: err}
+		}
+		members, scores = found, foundScores
+		usedCursor = true
+		after = b.position
 
 	case len(b.lastRandIds) > 0:
-		found, resolved, err := b.cursorPage(ctx, key, limit+1)
+		found, foundScores, resolved, ok, err := b.cursorPage(ctx, key, limit+1)
 		if err != nil {
 			return &FetchOutput[T]{error: err}
 		}
-		if !resolved {
+		if !ok {
 			// Every cursor the client held has left the index — it was purged, it
 			// expired, or those items were removed. Restarting is the only correct
 			// answer; silently serving page one would repeat items the client has.
 			return &FetchOutput[T]{error: ErrResetPagination}
 		}
-		members = found
+		members, scores = found, foundScores
 		usedCursor = true
+		after = resolved
 
 	default:
-		found, err := b.timeline.sortedSetClient.rangeMembers(ctx, b.timeline.direction, 0, limit, false, b.params)
+		found, foundScores, err := b.timeline.sortedSetClient.rangeWithScores(ctx, b.timeline.direction, 0, limit, b.params)
 		if err != nil {
 			return &FetchOutput[T]{error: err}
 		}
-		members = found
+		members, scores = found, foundScores
 	}
 
 	// hasMore is decided by what the index holds, before any item is loaded. Deriving
@@ -490,6 +584,7 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 	hasMore := !b.fetchAll && int64(len(members)) > limit
 	if hasMore {
 		members = members[:limit]
+		scores = scores[:limit]
 	}
 
 	items, dangling, errHydrate := b.timeline.sortedSetClient.hydrate(
@@ -515,13 +610,16 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 	}
 
 	validLastId := ""
+	nextCursor := after
 	if len(members) > 0 {
 		validLastId = members[len(members)-1]
+		nextCursor = Cursor{Score: scores[len(scores)-1], Member: validLastId}
 	}
 
 	return &FetchOutput[T]{
 		items:       items,
 		validLastId: validLastId,
+		nextCursor:  nextCursor,
 		position:    position,
 		firstPage:   !usedCursor,
 		hasMore:     hasMore,

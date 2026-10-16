@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"time"
 )
 
@@ -110,11 +111,19 @@ func (s *scorer[T]) score(scored T) (float64, error) {
 	return 0, fmt.Errorf("redifu: sorting reference %q cannot be scored", s.reference)
 }
 
-// formatScore renders a score for Lua and for ZRANGEBYSCORE bounds without the
-// exponent notation strconv would otherwise produce for large values.
+// formatScore renders a score for Lua and for ZRANGEBYSCORE bounds. An integer — every
+// score redifu itself produces — renders as plain digits. Anything else renders in the
+// shortest form that parses back to the same float64, so a cursor built from a score
+// read out of the index addresses exactly that score; the fixed six decimals used here
+// before could not. Infinities are spelled the way Redis reads them.
 func formatScore(score float64) string {
-	if score == math.Trunc(score) && math.Abs(score) < float64(maxExactScore) {
-		return fmt.Sprintf("%d", int64(score))
+	switch {
+	case math.IsInf(score, 1):
+		return "+inf"
+	case math.IsInf(score, -1):
+		return "-inf"
+	case score == math.Trunc(score) && math.Abs(score) < float64(maxExactScore):
+		return strconv.FormatInt(int64(score), 10)
 	}
-	return fmt.Sprintf("%f", score)
+	return strconv.FormatFloat(score, 'g', -1, 64)
 }

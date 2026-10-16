@@ -32,6 +32,11 @@ var (
 	// ErrScoreOutOfRange is returned when an int64 sorting reference cannot be held
 	// exactly by a float64 sorted-set score, which would corrupt ordering silently.
 	ErrScoreOutOfRange = errors.New("redifu: sorting reference exceeds the exact integer range of a sorted-set score")
+
+	// ErrInvalidCursor is returned by ParseCursor for a token Cursor.String did not
+	// produce, and by FetchFrom for a cursor whose score is not a number. A consumer
+	// can answer it with a client error.
+	ErrInvalidCursor = errors.New("redifu: invalid cursor")
 )
 
 // ResetPagination is the old name of ErrResetPagination.

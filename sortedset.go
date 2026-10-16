@@ -186,6 +186,49 @@ func (cr *SortedSet[T]) rangeMembers(
 	return result.Val(), nil
 }
 
+// rangeWithScores reads members by rank together with the score the index holds for
+// each. Timeline needs the score of a page's last member to hand back a Cursor, and it
+// has to be the stored score, not one recomputed from an item that may have changed.
+func (cr *SortedSet[T]) rangeWithScores(
+	ctx context.Context,
+	direction string,
+	start int64,
+	stop int64,
+	keyParams []string,
+) ([]string, []float64, error) {
+	if direction != Ascending && direction != Descending {
+		return nil, nil, fmt.Errorf("redifu: direction must be %q or %q, got %q", Ascending, Descending, direction)
+	}
+
+	key, errKey := cr.key(keyParams)
+	if errKey != nil {
+		return nil, nil, errKey
+	}
+
+	var result *redis.ZSliceCmd
+	if direction == Descending {
+		result = cr.client.ZRevRangeWithScores(ctx, key, start, stop)
+	} else {
+		result = cr.client.ZRangeWithScores(ctx, key, start, stop)
+	}
+	if result.Err() != nil {
+		return nil, nil, result.Err()
+	}
+
+	members := make([]string, 0, len(result.Val()))
+	scores := make([]float64, 0, len(result.Val()))
+	for _, entry := range result.Val() {
+		member, ok := entry.Member.(string)
+		if !ok {
+			return nil, nil, fmt.Errorf("redifu: unexpected member type %T", entry.Member)
+		}
+		members = append(members, member)
+		scores = append(scores, entry.Score)
+	}
+
+	return members, scores, nil
+}
+
 // hydrate turns a list of randIds into items: one batched Base read, then one batched
 // read per relation. It returns the items it could resolve and how many members the
 // index held that Base no longer does.
