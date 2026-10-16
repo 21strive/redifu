@@ -356,6 +356,12 @@ type sortedFetchBuilder[T Blueprint] struct {
 	byScore       bool
 	lowerbound    int64
 	upperbound    int64
+	byRank        bool
+	rankStart     int64
+	rankStop      int64
+	limited       bool
+	offset        int64
+	count         int64
 }
 
 func (s *sortedFetchBuilder[T]) WithParams(params ...string) *sortedFetchBuilder[T] {
@@ -369,29 +375,92 @@ func (s *sortedFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}),
 	return s
 }
 
+// WithRange reads the members whose score lies between lowerbound and upperbound, both
+// inclusive: ZRANGEBYSCORE, or ZREVRANGEBYSCORE for Descending. It replaces an earlier
+// WithRankRange on the same builder.
 func (s *sortedFetchBuilder[T]) WithRange(lowerbound int64, upperbound int64) *sortedFetchBuilder[T] {
 	s.byScore = true
+	s.byRank = false
 	s.lowerbound = lowerbound
 	s.upperbound = upperbound
 	return s
 }
 
+// WithRankRange reads the members at ranks start through stop, both inclusive, in the
+// fetch's direction: ZRANGE, or ZREVRANGE for Descending. A negative rank counts from
+// the end, as in Redis, so WithRankRange(-10, -1) is the last ten. It replaces an earlier
+// WithRange on the same builder.
+//
+// Ranks shift when a member leaves — including a dangling member that self-healing
+// removes during a read — so pages cut by rank can skip an item at a boundary. When
+// pages must stay put, store the position as the score and page with WithRange.
+func (s *sortedFetchBuilder[T]) WithRankRange(start int64, stop int64) *sortedFetchBuilder[T] {
+	s.byRank = true
+	s.byScore = false
+	s.rankStart = start
+	s.rankStop = stop
+	return s
+}
+
+// WithLimit skips the first offset members of a score range and returns at most count of
+// them: ZRANGEBYSCORE ... LIMIT offset count. Without WithRange it applies to the whole
+// collection. A negative count returns every member after offset; a count of zero
+// returns none. A rank range is already a limit, so combining the two is an error.
+func (s *sortedFetchBuilder[T]) WithLimit(offset int64, count int64) *sortedFetchBuilder[T] {
+	s.limited = true
+	s.offset = offset
+	s.count = count
+	return s
+}
+
+// members reads the randIds the fetch covers, in its direction.
+func (s *sortedFetchBuilder[T]) members(ctx context.Context) ([]string, error) {
+	set := s.sorted.sortedSetClient
+
+	switch {
+	case s.byRank && s.limited:
+		return nil, errors.New("redifu: WithLimit applies to a score range — a rank range is already a limit")
+
+	case s.byRank:
+		return set.rangeMembers(ctx, s.direction, s.rankStart, s.rankStop, false, s.keyParams)
+
+	case s.limited:
+		lower, upper := "-inf", "+inf"
+		if s.byScore {
+			lower, upper = formatScore(float64(s.lowerbound)), formatScore(float64(s.upperbound))
+		}
+		return set.scoreRangeMembers(ctx, s.direction, lower, upper, s.offset, s.count, s.keyParams)
+
+	case s.byScore:
+		return set.rangeMembers(ctx, s.direction, s.lowerbound, s.upperbound, true, s.keyParams)
+
+	default:
+		return set.rangeMembers(ctx, s.direction, 0, -1, false, s.keyParams)
+	}
+}
+
 func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
-	start, stop := int64(0), int64(-1)
-	if s.byScore {
-		start, stop = s.lowerbound, s.upperbound
+	members, err := s.members(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(members) == 0 {
+		return nil, nil
 	}
 
-	return s.sorted.sortedSetClient.Fetch(
+	items, _, errHydrate := s.sorted.sortedSetClient.hydrate(
 		ctx,
 		s.sorted.baseClient,
-		s.direction,
-		s.processor,
-		s.processorArgs,
+		members,
 		combineRelations(s.sorted.baseClient, s.sorted.relations),
 		s.sorted.baseClient.relationDepth,
-		start,
-		stop,
-		s.byScore,
-		s.keyParams...)
+		s.processor,
+		s.processorArgs,
+		s.keyParams,
+	)
+	if errHydrate != nil {
+		return nil, errHydrate
+	}
+
+	return items, nil
 }

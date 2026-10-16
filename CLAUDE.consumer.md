@@ -649,6 +649,31 @@ items, err := ScoreSorted.Fetch(redifu.Descending).
     Exec(ctx)
 ```
 
+Page through a score range — or the whole collection — with `WithLimit(offset, count)`
+(`ZRANGEBYSCORE … LIMIT`), or read a slice by position with `WithRankRange(start, stop)`
+(`ZRANGE`/`ZREVRANGE`, negative ranks count from the end):
+
+```go
+// the second page of 20 within the range
+items, err := ScoreSorted.Fetch(redifu.Descending).
+    WithParams(seasonRandId).
+    WithRange(1000, 5000).
+    WithLimit(20, 20).
+    Exec(ctx)
+
+// the top ten
+top, err := ScoreSorted.Fetch(redifu.Descending).
+    WithParams(seasonRandId).
+    WithRankRange(0, 9).
+    Exec(ctx)
+```
+
+Ranks shift when a member leaves the index — self-healing removes dangling members during a
+read — so pages cut by rank can skip an item at a boundary. When pages must not move (search
+results cached per query, for instance), store each item's position as its score and page
+with `WithRange`. A count of zero returns nothing; a negative count everything after the
+offset; `WithLimit` together with `WithRankRange` is an error.
+
 ---
 
 ## Standard pattern: Page fetch handler

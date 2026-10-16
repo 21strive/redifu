@@ -357,6 +357,18 @@ while it was set); it is still dropped when an item takes a full index past one 
 Nothing to change in your code. `ErrNotIngested` keeps its meaning: stored in `Base`, not
 indexed; the top-up that reaches the item loads it.
 
+## 18. Sorted: rank ranges and score-range limits
+
+An addition; `Fetch`, `WithRange` and `Exec` behave as before.
+
+| New | |
+|---|---|
+| `sortedFetchBuilder.WithRankRange(start, stop int64)` | members at ranks `start..stop`, both inclusive, in the fetch's direction (`ZRANGE` / `ZREVRANGE`); negative ranks count from the end. Replaces an earlier `WithRange` on the same builder, and the other way round |
+| `sortedFetchBuilder.WithLimit(offset, count int64)` | `ZRANGEBYSCORE … LIMIT offset count` on the `WithRange` range, or on the whole collection without one. `count < 0`: everything after `offset`; `count == 0`: nothing; a negative `offset`, or a limit on a rank range, is an error |
+
+Ranks move when members leave — self-healing removes dangling members during a read — so
+for pages that must not shift, keep the position in the score and page with `WithRange`.
+
 ---
 
 ## Checklist

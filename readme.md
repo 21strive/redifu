@@ -127,6 +127,19 @@ items, err := commentSorted.Fetch(redifu.Ascending).
     WithParams(postRandId).
     WithRange(lowerUnixMilli, upperUnixMilli).
     Exec(ctx)
+
+// A page of that range: ZRANGEBYSCORE ... LIMIT 20 20
+items, err := commentSorted.Fetch(redifu.Ascending).
+    WithParams(postRandId).
+    WithRange(lowerUnixMilli, upperUnixMilli).
+    WithLimit(20, 20).
+    Exec(ctx)
+
+// By rank: the ten newest
+items, err := commentSorted.Fetch(redifu.Descending).
+    WithParams(postRandId).
+    WithRankRange(0, 9).
+    Exec(ctx)
 ```
 
 ---

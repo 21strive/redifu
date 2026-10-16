@@ -88,6 +88,8 @@ func TestRealRedis(t *testing.T) {
 		"TimelineIngestIntoAnEmptyIndex":              scenarioTimelineIngestIntoAnEmptyIndex,
 		"AnOldItemJoinsAFullySeededTimeline":          scenarioAnOldItemJoinsAFullySeededTimeline,
 		"AnOldItemWaitsForTheTopUpOfAPartialTimeline": scenarioAnOldItemWaitsForTheTopUpOfAPartialTimeline,
+		"SortedRankRange":                             scenarioSortedRankRange,
+		"SortedScoreRangeWithLimit":                   scenarioSortedScoreRangeWithLimit,
 	}
 
 	for name, scenario := range scenarios {

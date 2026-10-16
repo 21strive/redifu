@@ -186,6 +186,49 @@ func (cr *SortedSet[T]) rangeMembers(
 	return result.Val(), nil
 }
 
+// scoreRangeMembers reads the members of a score range with a LIMIT: ZRANGEBYSCORE, or
+// ZREVRANGEBYSCORE for Descending. lower and upper are rendered bounds ("-inf", "+inf"
+// or a formatted score). A count of zero answers without a query — go-redis drops a
+// LIMIT of 0 0, which would return the whole range — and a negative count reads
+// everything after offset.
+func (cr *SortedSet[T]) scoreRangeMembers(
+	ctx context.Context,
+	direction string,
+	lower string,
+	upper string,
+	offset int64,
+	count int64,
+	keyParams []string,
+) ([]string, error) {
+	if direction != Ascending && direction != Descending {
+		return nil, fmt.Errorf("redifu: direction must be %q or %q, got %q", Ascending, Descending, direction)
+	}
+	if offset < 0 {
+		return nil, fmt.Errorf("redifu: limit offset must not be negative, got %d", offset)
+	}
+	if count == 0 {
+		return nil, nil
+	}
+
+	key, errKey := cr.key(keyParams)
+	if errKey != nil {
+		return nil, errKey
+	}
+
+	bounds := redis.ZRangeBy{Min: lower, Max: upper, Offset: offset, Count: count}
+	var result *redis.StringSliceCmd
+	if direction == Descending {
+		result = cr.client.ZRevRangeByScore(ctx, key, &bounds)
+	} else {
+		result = cr.client.ZRangeByScore(ctx, key, &bounds)
+	}
+	if result.Err() != nil {
+		return nil, result.Err()
+	}
+
+	return result.Val(), nil
+}
+
 // rangeWithScores reads members by rank together with the score the index holds for
 // each. Timeline needs the score of a page's last member to hand back a Cursor, and it
 // has to be the stored score, not one recomputed from an item that may have changed.
