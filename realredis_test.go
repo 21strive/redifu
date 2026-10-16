@@ -95,6 +95,8 @@ func TestRealRedis(t *testing.T) {
 		"TimeSeriesTakesTheFirstItemOfAnEmptySeededRange": scenarioTimeSeriesTakesTheFirstItemOfAnEmptySeededRange,
 		"TimeSeriesAddSegmentAlignsTheTwoTTLs":            scenarioTimeSeriesAddSegmentAlignsTheTwoTTLs,
 		"TimeSeriesReadsSecondsScoresInSeconds":           scenarioTimeSeriesReadsSecondsScoresInSeconds,
+		"TimelineWithLimitOverridesThePageSize":           scenarioTimelineWithLimitOverridesThePageSize,
+		"DocumentedTimelineFlowWithAnotherPageSize":       scenarioDocumentedTimelineFlowWithAnotherPageSize,
 	}
 
 	for name, scenario := range scenarios {
