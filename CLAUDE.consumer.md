@@ -591,10 +591,14 @@ var (
     ScoreSorted *redifu.Sorted[*Score]
 )
 
-func InitScore(redisClient redis.UniversalClient) {
-    ScoreBase = redifu.NewBase[*Score](redisClient, "score:%s", 7*24*time.Hour)
+func InitScore(redisClient redis.UniversalClient) error {
+    var err error
+    if ScoreBase, err = redifu.NewBase[*Score](redisClient, "score:%s", 7*24*time.Hour); err != nil {
+        return err
+    }
     // Sorted takes no direction at construction — direction is passed at Fetch time.
-    ScoreSorted = redifu.NewSorted[*Score](redisClient, ScoreBase, "leaderboard:%s", sortedSetTTL)
+    ScoreSorted, err = redifu.NewSorted[*Score](redisClient, ScoreBase, "leaderboard:%s", sortedSetTTL)
+    return err
 }
 
 // Sorted seeder needs only a RowsScanner — there is no cursor reference to fetch.
@@ -715,9 +719,12 @@ var (
     CommentPage *redifu.Page[*Comment]
 )
 
-func InitComment(redisClient redis.UniversalClient) {
-    CommentBase = redifu.NewBase[*Comment](redisClient, "comment:%s", 7*24*time.Hour)
-    CommentPage = redifu.NewPage[*Comment](
+func InitComment(redisClient redis.UniversalClient) error {
+    var err error
+    if CommentBase, err = redifu.NewBase[*Comment](redisClient, "comment:%s", 7*24*time.Hour); err != nil {
+        return err
+    }
+    CommentPage, err = redifu.NewPage[*Comment](
         redisClient,
         CommentBase,
         "post:%s:comments",
@@ -725,6 +732,7 @@ func InitComment(redisClient redis.UniversalClient) {
         redifu.Ascending, // direction
         2*24*time.Hour,
     )
+    return err
 }
 
 func seedCommentPage(ctx context.Context, postRandId string, page int64) error {
@@ -811,14 +819,20 @@ var (
     TxTimeSeries *redifu.TimeSeries[*Transaction]
 )
 
-func InitTransaction(redisClient redis.UniversalClient) {
-    TxBase = redifu.NewBase[*Transaction](redisClient, "tx:%s", 7*24*time.Hour)
-    TxTimeSeries = redifu.NewTimeSeries[*Transaction](redisClient, TxBase, "tx:account:%s", 2*24*time.Hour)
+func InitTransaction(redisClient redis.UniversalClient) error {
+    var err error
+    if TxBase, err = redifu.NewBase[*Transaction](redisClient, "tx:%s", 7*24*time.Hour); err != nil {
+        return err
+    }
+    if TxTimeSeries, err = redifu.NewTimeSeries[*Transaction](redisClient, TxBase, "tx:account:%s", 2*24*time.Hour); err != nil {
+        return err
+    }
 
     // Sorting by an int64 column? Say what it counts. Without this, Unix seconds are read
     // as milliseconds: every row lands in January 1970, outside every range you fetch.
     // if err := TxTimeSeries.SetSortingReference("BookedAt"); err != nil { ... } // int64, Unix seconds
     // if err := TxTimeSeries.SetScoreUnit(time.Second); err != nil { ... }
+    return nil
 }
 
 func seedTransactions(ctx context.Context, accountRandId string, from, to time.Time) error {
