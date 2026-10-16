@@ -891,6 +891,12 @@ func GetTransactions(ctx context.Context, accountRandId string, from, to time.Ti
 }
 ```
 
+Writing into a series: `TxTimeSeries.AddItem(ctx, tx, accountRandId)` stores the item in its `Base`
+(if absent, TTL refreshed) and places it into the index when a seeded segment covers its
+timestamp — also when that range was seeded while it held no rows, so the first transaction
+of an empty month shows up at once. Outside every segment it returns `ErrNotIngested`: the
+range is not cached, and the seed that loads it will find the row.
+
 ---
 
 ## Standard pattern: Add / Update / Remove

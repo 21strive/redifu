@@ -100,27 +100,60 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		return false, errGetScore
 	}
 
+	key, errKey := s.sorted.sortedSetClient.key(keyParams)
+	if errKey != nil {
+		return false, errKey
+	}
+
 	itemTime := time.UnixMilli(int64(itemScore)).UTC()
 
 	covered, errCovered := s.Covers(ctx, itemTime, keyParams...)
 	if errCovered != nil {
 		return false, errCovered
 	}
-	if !covered {
-		// The item falls outside every seeded range, so there is nothing for it to
-		// join. It is reported rather than silently dropped.
-		return false, nil
-	}
 
 	// The caller's pipeline is used when there is one. This branch used to be
 	// inverted: a caller-supplied pipeline was ignored and a second pipeline was
 	// executed behind the caller's back, which broke both ordering and atomicity.
-	return s.sorted.addItem(ctx, pipe, item, keyParams...)
+	var selfPipe bool
+	if pipe == nil {
+		pipe = s.redis.Pipeline()
+		selfPipe = true
+	}
+
+	// Base holds the item whether or not the series indexes it, as with every other
+	// collection: written only if absent, its TTL refreshed either way, so an index can
+	// never outlive the items it points at.
+	if err := s.sorted.baseClient.WithPipeline(pipe).SetIfAbsent(ctx, item); err != nil {
+		return false, err
+	}
+
+	if covered {
+		// A series is seeded where its segments say so, not where its sorted set holds
+		// members: a range seeded while it had no rows leaves segments and no sorted set
+		// at all. So a covered item is added whatever ZCARD says — the Sorted ingest
+		// script, which waits for a non-empty set, dropped the first item of every such
+		// range. This ZADD may be the one that creates the set, so the TTL is applied
+		// too, and the index keeps living at least as long as its segments.
+		pipe.ZAdd(ctx, key, redis.Z{Score: itemScore, Member: item.GetRandId()})
+		if s.timeToLive > 0 {
+			pipe.Expire(ctx, key, s.timeToLive)
+		}
+	}
+
+	if selfPipe {
+		if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
+			return false, errPipe
+		}
+	}
+
+	return covered, nil
 }
 
-// AddItem places an item into the series if its timestamp falls inside a seeded
-// segment. It returns ErrNotIngested when the timestamp is outside every seeded range,
-// or when the series itself is not seeded.
+// AddItem stores the item in Base if it is not there yet, always refreshes its TTL, and
+// places it into the series when its timestamp falls inside a seeded segment — even when
+// every item seeded there so far was zero. It returns ErrNotIngested when the timestamp
+// is outside every seeded range, or the series is not seeded at all.
 func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string) error {
 	ingested, err := s.addItem(ctx, nil, item, keyParams...)
 	if err != nil {

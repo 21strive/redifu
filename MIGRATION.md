@@ -380,6 +380,22 @@ of a Timeline's `Dangling()`. Self-healing removes those members either way. A c
 that needs a whole list (a full collection, a calendar month) reseeds when the count is not
 zero.
 
+## 20. TimeSeries.AddItem trusts its segments
+
+A behaviour change in `TimeSeries.AddItem` (and `WithPipeline(pipe).AddItem`):
+
+- **An item inside a seeded segment is indexed even when the index is empty.** The segments
+  are what say a range is seeded; the sorted set does not exist yet when every seeded range
+  was empty. `AddItem` used to go through the `Sorted` ingest script, which waits for a
+  non-empty set, so the first booking of an empty month returned `ErrNotIngested` and stayed
+  invisible — `Fetch` answered "no items, nothing to seed" — until the segment expired.
+  The ZADD that creates the set also applies the series TTL.
+- **The item is stored in `Base` whether or not it is indexed** (`SetIfAbsent`, TTL
+  refreshed), as `AddItem` does on every other collection. An item outside every segment
+  still returns `ErrNotIngested`, but its key now exists.
+
+Everything still goes into the caller's pipeline when there is one.
+
 ---
 
 ## Checklist
