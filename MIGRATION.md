@@ -396,6 +396,20 @@ A behaviour change in `TimeSeries.AddItem` (and `WithPipeline(pipe).AddItem`):
 
 Everything still goes into the caller's pipeline when there is one.
 
+## 21. A TimeSeries index expires with its segments
+
+`AddSegment` renewed the segment store's TTL on every seed while the index kept the TTL of
+its first seed (the documented seeder applied it once), so the index expired first and
+`Fetch` answered ranges the segments still claimed with no items and no gap to seed.
+
+`AddSegment` now refreshes the index TTL together with the segments', and `IngestItem`
+refreshes the index TTL too, so the index has one whatever order a seeder enqueues its
+commands in. The index never expires before its segments; once both expire, the range
+reads as a gap and is seeded again.
+
+Your seeder can drop the "apply `SetExpiration` on the first non-empty seed" step — it is
+harmless if kept. Enqueue `AddSegment` after the `IngestItem` calls of its range.
+
 ---
 
 ## Checklist

@@ -165,8 +165,21 @@ func (s *TimeSeries[T]) AddItem(ctx context.Context, item T, keyParams ...string
 	return nil
 }
 
+// IngestItem places an item into the series while seeding. It also refreshes the index
+// TTL, so that the sorted set has one whatever order a seeder enqueues its commands in:
+// an EXPIRE queued by AddSegment before the first ZADD of a new series finds no key.
 func (s *TimeSeries[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, item T, keyParams ...string) error {
-	return s.sorted.IngestItem(ctx, pipe, item, true, keyParams...)
+	if err := s.sorted.IngestItem(ctx, pipe, item, true, keyParams...); err != nil {
+		return err
+	}
+	if s.timeToLive > 0 {
+		key, err := s.sorted.sortedSetClient.key(keyParams)
+		if err != nil {
+			return err
+		}
+		pipe.Expire(ctx, key, s.timeToLive)
+	}
+	return nil
 }
 
 func (s *TimeSeries[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
@@ -176,6 +189,12 @@ func (s *TimeSeries[T]) RemoveItem(ctx context.Context, item T, keyParams ...str
 // AddSegment stores a seeded segment range in the segment store.
 // Validates that the new segment doesn't overlap with any existing segment.
 // Segments are stored in a Redis hash: field = lowerbound, value = upperbound.
+//
+// It refreshes the TTL of the segment store and of the index together. The two used to
+// drift apart: every AddSegment renewed the segments while the index kept the TTL of
+// its first seed, so the index expired first and Fetch answered the ranges its segments
+// still claimed with nothing, and no gap to seed. Enqueue it after the IngestItem calls
+// of the range it records.
 func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lowerbound time.Time, upperbound time.Time, segmentStoreKeyParams ...string) error {
 	if !lowerbound.Before(upperbound) {
 		return fmt.Errorf("redifu: invalid range: lowerbound (%s) must be less than upperbound (%s)", lowerbound.Format(time.RFC3339), upperbound.Format(time.RFC3339))
@@ -189,11 +208,19 @@ func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lo
 	if errKey != nil {
 		return errKey
 	}
+	indexKey, errIndexKey := s.sorted.sortedSetClient.key(segmentStoreKeyParams)
+	if errIndexKey != nil {
+		return errIndexKey
+	}
 
 	pipe.HSet(ctx, segmentStoreKey, strconv.FormatInt(lowerbound.UnixMilli(), 10), upperbound.UnixMilli())
 
 	if s.timeToLive > 0 {
 		pipe.Expire(ctx, segmentStoreKey, s.timeToLive)
+		// The index goes with its segments, never before them. An index that outlives
+		// its segments costs a reseed at worst; segments that outlive the index claim
+		// ranges it no longer holds.
+		pipe.Expire(ctx, indexKey, s.timeToLive)
 	}
 
 	return nil

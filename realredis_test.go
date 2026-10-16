@@ -93,6 +93,7 @@ func TestRealRedis(t *testing.T) {
 		"SortedExecReportCountsDanglingMembers":           scenarioSortedExecReportCountsDanglingMembers,
 		"SortedExecReportCountsOnlyTheRangeItRead":        scenarioSortedExecReportCountsOnlyTheRangeItRead,
 		"TimeSeriesTakesTheFirstItemOfAnEmptySeededRange": scenarioTimeSeriesTakesTheFirstItemOfAnEmptySeededRange,
+		"TimeSeriesAddSegmentAlignsTheTwoTTLs":            scenarioTimeSeriesAddSegmentAlignsTheTwoTTLs,
 	}
 
 	for name, scenario := range scenarios {

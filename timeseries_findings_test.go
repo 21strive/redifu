@@ -9,6 +9,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Booking is a row whose time is a time.Time, like the createdAt of a Post.
@@ -149,5 +151,120 @@ func TestTimeSeriesStoresAnUncoveredItemInBaseOnly(t *testing.T) {
 	other := newBooking(t, "other", jan1.Add(time.Hour))
 	if err := series.AddItem(ctx, other, "owner2"); !errors.Is(err, ErrNotIngested) {
 		t.Fatalf("AddItem into an unseeded series = %v, want ErrNotIngested", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// C — the index expires with its segments, not before them
+// ---------------------------------------------------------------------------
+
+// seedRange is the documented TimeSeries seeder for one gap: the rows, then the segment
+// that records the range. setExpiration replays the previous documentation, which applied
+// the index TTL only with the first non-empty seed.
+func seedRange(t *testing.T, series *TimeSeries[*Booking], base *Base[*Booking], from, to time.Time, owner string, setExpiration bool, rows ...*Booking) {
+	t.Helper()
+	ctx := context.Background()
+	pipe := series.redis.Pipeline()
+	for _, row := range rows {
+		if err := base.WithPipeline(pipe).Set(ctx, row); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		if err := series.IngestItem(ctx, pipe, row, owner); err != nil {
+			t.Fatalf("IngestItem: %v", err)
+		}
+	}
+	if setExpiration {
+		if err := series.SetExpiration(ctx, pipe, owner); err != nil {
+			t.Fatalf("SetExpiration: %v", err)
+		}
+	}
+	if err := series.AddSegment(ctx, pipe, from, to, owner); err != nil {
+		t.Fatalf("AddSegment: %v", err)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+}
+
+func TestTimeSeriesIndexOutlivesItsSegments(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "documented seeder"
+		if legacy {
+			name = "seeder that sets the index TTL on its first seed only"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, client := newTestRedis(t)
+			series, base, ctx := bookingSeries(t, func(*testing.T) redis.UniversalClient { return client })
+
+			seedRange(t, series, base, jan1, feb1, "owner1", legacy, newBooking(t, "jan", jan1.Add(48*time.Hour)))
+			server.FastForward(25 * time.Hour)
+			seedRange(t, series, base, feb1, mar1, "owner1", false, newBooking(t, "feb", feb1.Add(48*time.Hour)))
+
+			// 49 hours after the first seed: past its original index TTL, inside the TTL
+			// the second AddSegment gave both keys.
+			server.FastForward(24 * time.Hour)
+
+			items, needsSeed, err := series.Fetch(jan1, mar1).WithParams("owner1").Exec(ctx)
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if needsSeed || len(items) != 2 {
+				t.Fatalf("Fetch January–February = %d items, needsSeed = %v; want both bookings — the index expired before its segments", len(items), needsSeed)
+			}
+
+			// And once both expire, the range reads as a gap again instead of as empty.
+			server.FastForward(indexTTL)
+			items, needsSeed, err = series.Fetch(jan1, mar1).WithParams("owner1").Exec(ctx)
+			if err != nil || !needsSeed || len(items) != 0 {
+				t.Fatalf("after both expired: %d items, needsSeed = %v, %v; want a gap to seed", len(items), needsSeed, err)
+			}
+		})
+	}
+}
+
+func TestTimeSeriesAddSegmentAlignsTheTwoTTLs(t *testing.T) {
+	scenarioTimeSeriesAddSegmentAlignsTheTwoTTLs(t, miniClient)
+}
+
+func scenarioTimeSeriesAddSegmentAlignsTheTwoTTLs(t *testing.T, newClient clientFactory) {
+	series, base, ctx := bookingSeries(t, newClient)
+	seedRange(t, series, base, jan1, feb1, "owner1", false, newBooking(t, "jan", jan1.Add(time.Hour)))
+
+	indexTTLLeft, err := series.redis.TTL(ctx, indexKey("cal:owner1")).Result()
+	if err != nil {
+		t.Fatalf("TTL index: %v", err)
+	}
+	segmentsTTLLeft, err := series.redis.TTL(ctx, "cal:owner1:segments").Result()
+	if err != nil {
+		t.Fatalf("TTL segments: %v", err)
+	}
+	if indexTTLLeft <= 0 || indexTTLLeft < segmentsTTLLeft {
+		t.Fatalf("index TTL %v, segments TTL %v: the index must not expire first", indexTTLLeft, segmentsTTLLeft)
+	}
+}
+
+func TestTimeSeriesIndexGetsATTLWhateverTheSeedOrder(t *testing.T) {
+	ctx := context.Background()
+	series, base, _ := bookingSeries(t, miniClient)
+
+	// AddSegment enqueued before the rows: its EXPIRE runs before the sorted set exists.
+	pipe := series.redis.Pipeline()
+	if err := series.AddSegment(ctx, pipe, jan1, feb1, "owner1"); err != nil {
+		t.Fatalf("AddSegment: %v", err)
+	}
+	row := newBooking(t, "jan", jan1.Add(time.Hour))
+	if err := base.WithPipeline(pipe).Set(ctx, row); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := series.IngestItem(ctx, pipe, row, "owner1"); err != nil {
+		t.Fatalf("IngestItem: %v", err)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	ttl, err := series.redis.TTL(ctx, indexKey("cal:owner1")).Result()
+	if err != nil || ttl <= 0 {
+		t.Fatalf("index TTL = %v (%v), want one — the index would never expire", ttl, err)
 	}
 }

@@ -824,12 +824,6 @@ func seedTransactions(ctx context.Context, accountRandId string, from, to time.T
         }
 
         pipe := redisClient.Pipeline()
-        seededCount, err := TxTimeSeries.Count(ctx, accountRandId)
-        if err != nil {
-            return err
-        }
-        alreadySeeded := seededCount > 0
-        var count int64
 
         for rows.Next() {
             item, err := scanTxRows(rows)
@@ -839,7 +833,6 @@ func seedTransactions(ctx context.Context, accountRandId string, from, to time.T
             }
             TxBase.WithPipeline(pipe).Set(ctx, item)
             TxTimeSeries.IngestItem(ctx, pipe, item, accountRandId)
-            count++
         }
         if err = rows.Err(); err != nil {
             rows.Close()
@@ -847,13 +840,10 @@ func seedTransactions(ctx context.Context, accountRandId string, from, to time.T
         }
         rows.Close()
 
-        // TTL is applied once, when the first segment lands
-        if count > 0 && !alreadySeeded {
-            TxTimeSeries.SetExpiration(ctx, pipe, accountRandId)
-        }
-
-        // record the range as seeded even when it returned nothing,
-        // otherwise it is re-queried on every request
+        // Record the range as seeded even when it returned nothing, otherwise it is
+        // re-queried on every request. AddSegment also refreshes the TTL of the index
+        // with that of the segments, so the index never expires before the ranges it
+        // claims to hold: no SetExpiration needed. Enqueue it after the rows.
         TxTimeSeries.AddSegment(ctx, pipe, lower, upper, accountRandId)
 
         if _, err := pipe.Exec(ctx); err != nil {
@@ -1104,6 +1094,6 @@ every account in it reflects the change — no feed purged, no page reseeded, an
 - Do not give a collection's sorted set a TTL longer than (or equal to) its `Base` TTL — `Base` must outlive the index
 - Do not size a Timeline top-up as a whole page — load `perPage + 1 - len(output.Items())` rows, so `HasMore()` is read from the index
 - Do not call `pipe.Exec` inside your seeding loop — enqueue everything, execute once at the end
-- Do not seed a `TimeSeries` range without `AddSegment` — the range will be re-queried on every request
+- Do not seed a `TimeSeries` range without `AddSegment` — the range will be re-queried on every request. `AddSegment` also keeps the index TTL in step with the segments; there is no separate `SetExpiration` to remember
 - Do not sort by a snowflake id — an `int64` score beyond 2^53 is refused, because a float64 cannot hold it exactly and the index would reorder itself silently
 - Do not register a relation on an index when it belongs to the entity — `Base.AddRelation` makes it resolve everywhere, `index.AddRelation` only in that index
