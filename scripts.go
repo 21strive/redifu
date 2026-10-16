@@ -34,10 +34,24 @@ return 0
 `)
 
 // timelineIngestScript places an item into a Timeline index, honouring the window the
-// index currently holds and the first/last page markers.
+// index currently holds.
 //
 //	KEYS[1] sorted set   KEYS[2] :firstpage   KEYS[3] :lastpage   KEYS[4] :blankpage
 //	ARGV[1] score        ARGV[2] member       ARGV[3] itemPerPage ARGV[4] direction
+//
+// A Timeline index holds a prefix of the data in the timeline's order: the head, then
+// whatever top-ups have loaded, ending at its tail. An item belongs to that window when
+// it sorts at or before the tail — score first, then member, byte by byte, in the
+// timeline's direction. An item past the tail is left out, because rows between the
+// tail and the item may still be missing from the index: it arrives with the top-up
+// that reaches it. Once :lastpage says the index holds the end of the data, there is
+// nothing past the tail and every item belongs.
+//
+// :firstpage is the original first-page marker. It is still dropped when an item takes
+// a full index past one page, as before; it does not widen or narrow the window.
+//
+// An empty index is not seeded (or was confirmed empty), so nothing is added to it; the
+// :blankpage marker is dropped so the next read seeds it, this item included.
 //
 // Returns 1 if the item entered the index, 0 otherwise.
 var timelineIngestScript = redis.NewScript(`
@@ -46,6 +60,17 @@ local member = ARGV[2]
 local perPage = tonumber(ARGV[3])
 local descending = ARGV[4] == 'desc'
 
+local function less(a, b)
+  local la, lb = #a, #b
+  for i = 1, math.min(la, lb) do
+    local x, y = string.byte(a, i), string.byte(b, i)
+    if x ~= y then
+      return x < y
+    end
+  end
+  return la < lb
+end
+
 redis.call('DEL', KEYS[4])
 
 local count = redis.call('ZCARD', KEYS[1])
@@ -53,34 +78,31 @@ if count == 0 then
   return 0
 end
 
-local isFirstPage = redis.call('EXISTS', KEYS[2]) == 1
-local isLastPage = redis.call('EXISTS', KEYS[3]) == 1
-
-if descending then
-  local edge = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-  local lowest = tonumber(edge[2])
-  if score >= lowest then
-    if count == perPage and isFirstPage then
-      redis.call('DEL', KEYS[2])
-    end
-    redis.call('ZADD', KEYS[1], score, member)
-    return 1
+local inside = redis.call('EXISTS', KEYS[3]) == 1
+if not inside then
+  local tail
+  if descending then
+    tail = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  else
+    tail = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')
   end
+  local tailMember, tailScore = tail[1], tonumber(tail[2])
+  if descending then
+    inside = score > tailScore or (score == tailScore and not less(member, tailMember))
+  else
+    inside = score < tailScore or (score == tailScore and not less(tailMember, member))
+  end
+end
+
+if not inside then
   return 0
 end
 
-local edge = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')
-local highest = tonumber(edge[2])
-if score <= highest then
-  if count == perPage and isFirstPage then
-    redis.call('DEL', KEYS[2])
-  end
-  if isFirstPage or isLastPage then
-    redis.call('ZADD', KEYS[1], score, member)
-    return 1
-  end
+if count == perPage and redis.call('EXISTS', KEYS[2]) == 1 then
+  redis.call('DEL', KEYS[2])
 end
-return 0
+redis.call('ZADD', KEYS[1], score, member)
+return 1
 `)
 
 // timelineCursorScript reads one page of a Timeline positioned after a cursor member.

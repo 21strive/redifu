@@ -242,6 +242,17 @@ This is not an optimisation to undo. It is what removes the read-decide-write ra
 between concurrent writers, and it turns a fan-out write from five round-trips per
 target into one enqueued command.
 
+**The Timeline window.** The index is a prefix of the data ending at its tail, so an item
+enters when it sorts at or before the tail — score, then member byte by byte, in the
+timeline's direction — and anywhere once `:lastpage` says the index reaches the end of the
+data. An item past the tail of a partial index is refused (`ErrNotIngested`): rows between
+the tail and the item may not be loaded yet, so adding it would put a hole in the prefix;
+the top-up that reaches it loads it. An empty index takes nothing (it is not seeded, or
+confirmed empty — the `:blankpage` marker is dropped so the next read seeds it).
+`:firstpage` does not move the window; it is still dropped when an item takes a full
+index past one page. An item already in the index whose new score falls past the tail
+keeps its old entry — scores of a Timeline are expected not to move backwards.
+
 Scripts are sent with `EVAL`, not `EVALSHA`: a pipelined `EVALSHA` cannot fall back when
 the script is not cached, because `NOSCRIPT` only surfaces at `Exec`. Every key a script
 touches must share a slot — hence the hash tag above.

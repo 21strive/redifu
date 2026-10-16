@@ -183,7 +183,7 @@ func InitRedis(redisClient redis.UniversalClient) {
 | Error | Means | What to do |
 |-------|-------|------------|
 | `redifu.ErrNotFound` | the item key is not in Base | treat as a cache miss; seed or 404 |
-| `redifu.ErrNotIngested` | `AddItem` stored the item and refreshed its TTL, but did not index it — the collection is not seeded, or the item is outside the window this index holds | usually ignore; it is not a failure |
+| `redifu.ErrNotIngested` | `AddItem` stored the item and refreshed its TTL, but did not index it — the collection is not seeded, or the item sorts past the tail of a Timeline that does not reach the end of the table yet (the top-up that reaches it loads it) | usually ignore; it is not a failure |
 | `redifu.ErrResetPagination` | `Fetch(lastRandIds)` only: none of the randId cursors you passed are in the index any more | tell the client to restart the feed — or move to `FetchFrom`, which never returns it |
 | `redifu.ErrInvalidCursor` | `ParseCursor` got a token `Cursor.String` did not produce, or `FetchFrom` a cursor whose score is not a number | answer the request with a client error |
 | `redifu.ErrRelationNotTransient` | a relation field is missing `json:"-"` | fix the tag, then re-save affected entities |

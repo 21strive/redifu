@@ -82,7 +82,12 @@ func TestRealRedis(t *testing.T) {
 		"DocumentedTimelineFlowWithANewItemMidScroll":        scenarioDocumentedTimelineFlowWithANewItemMidScroll,
 		"DocumentedTimelineFlowSurvivesARemovalMidScroll":    scenarioDocumentedTimelineFlowSurvivesARemovalMidScroll,
 		"DocumentedTimelineFlowRecoversAnIndexLostMidScroll": scenarioDocumentedTimelineFlowRecoversAnIndexLostMidScroll,
-		"ReachedEnd": scenarioReachedEnd,
+		"ReachedEnd":                                  scenarioReachedEnd,
+		"TimelineIngestDescending":                    scenarioTimelineIngestDescending,
+		"TimelineIngestAscending":                     scenarioTimelineIngestAscending,
+		"TimelineIngestIntoAnEmptyIndex":              scenarioTimelineIngestIntoAnEmptyIndex,
+		"AnOldItemJoinsAFullySeededTimeline":          scenarioAnOldItemJoinsAFullySeededTimeline,
+		"AnOldItemWaitsForTheTopUpOfAPartialTimeline": scenarioAnOldItemWaitsForTheTopUpOfAPartialTimeline,
 	}
 
 	for name, scenario := range scenarios {

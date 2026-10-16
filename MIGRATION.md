@@ -336,6 +336,27 @@ What your seeder changes:
 
 `RequiresSeeding` on `Timeline` is deprecated; it still answers as before.
 
+## 17. Timeline ingest: the window is the prefix the index holds
+
+A behaviour change in `AddItem` / `IngestItem(seed=false)` on a `Timeline`. The index holds
+a prefix of the data in the timeline's order, ending at its tail; an item now enters when it
+sorts at or before the tail, and anywhere once `:lastpage` is set.
+
+| Case | Before | Now |
+|---|---|---|
+| Descending, item older than the tail, `:lastpage` set | refused | **added** — e.g. a booking moving into a status timeline that already holds every booking of that status |
+| Descending, item with the tail's score but sorting after it (smaller member) | added | **refused** unless `:lastpage` — adding it could skip rows tied at that score that are not loaded yet |
+| Ascending, item at or before the tail (older than the head, between members) | refused unless `:firstpage` or `:lastpage` | **added** — it belongs to the prefix the index holds |
+| Ascending, item newer than the tail, `:lastpage` set | refused | **added** |
+| Ascending, item newer than the tail, no `:lastpage` | refused | refused |
+| Empty index | refused, `:blankpage` dropped | unchanged |
+
+`:firstpage` no longer widens the window (it made ascending timelines accept items only
+while it was set); it is still dropped when an item takes a full index past one page.
+
+Nothing to change in your code. `ErrNotIngested` keeps its meaning: stored in `Base`, not
+indexed; the top-up that reaches the item loads it.
+
 ---
 
 ## Checklist
