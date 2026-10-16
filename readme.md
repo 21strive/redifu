@@ -70,7 +70,7 @@ missing, _ := postBase.IsMissing(ctx, randId)
 Use for "load more" feeds. Manages page state (first/last/empty) automatically.
 
 ```go
-postTimeline := redifu.NewTimeline[Post](
+postTimeline, err := redifu.NewTimeline[*Post](
     redisClient,
     postBase,
     "feed:user:%s:posts",   // key format — %s is filled by keyParams
@@ -112,11 +112,11 @@ and database keysets that agree with it.
 Use for collections that are always fetched in full, or queried by score range.
 
 ```go
-commentSorted := redifu.NewSorted[Comment](
+commentSorted, err := redifu.NewSorted[*Comment](
     redisClient,
     commentBase,
     "post:%s:comments",
-    7*24*time.Hour,
+    2*24*time.Hour,
 )
 
 // Add
@@ -156,7 +156,7 @@ items, dangling, err := commentSorted.Fetch(redifu.Ascending).WithParams(postRan
 Use for numbered page pagination (page 1, 2, 3).
 
 ```go
-productPage := redifu.NewPage[Product](
+productPage, err := redifu.NewPage[*Product](
     redisClient,
     productBase,
     "category:%s:products",
@@ -179,11 +179,11 @@ needsSeed, _ := productPage.RequiresSeeding(ctx, pageNumber, categoryRandId)
 Use for historical data, charts, and reports. Tracks seeded segments and detects gaps automatically.
 
 ```go
-txTimeSeries := redifu.NewTimeSeries[Transaction](
+txTimeSeries, err := redifu.NewTimeSeries[*Transaction](
     redisClient,
     txBase,
     "account:%s:transactions",
-    7*24*time.Hour,
+    2*24*time.Hour, // shorter than txBase's TTL: Base must outlive the index
 )
 
 // Fetch — returns needsSeed=true if any gaps exist in the requested range
