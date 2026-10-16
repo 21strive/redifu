@@ -90,14 +90,18 @@ func (r *Record) GetUpdatedAt() time.Time { return r.UpdatedAt }
 // that points at the old one.
 //
 // The embedded Record is allocated first, so &Post{} is all a caller has to write.
-// Named fields are left alone — a relation field has to stay nil until a fetch
-// resolves it, which is why this does not simply allocate every nil pointer it finds.
+// Every other nil pointer field that is not a relation gets a zero value, as
+// v1.0.0-rc.2 did: consumers written against rc.2 read them right after creating an
+// entity (a disbursement's ProcessedAt, a transaction's settled fee), and some persist
+// them. A relation field — a pointer to an entity (a Blueprint) — is left nil: it has
+// to stay nil until a fetch resolves it.
 func InitRecord[T Blueprint](record T) {
 	value := reflect.ValueOf(record)
 	for value.Kind() == reflect.Pointer && !value.IsNil() {
 		value = value.Elem()
 	}
 	allocateEmbedded(value)
+	allocatePlainPointers(value)
 
 	now := time.Now().In(time.UTC)
 	record.SetUUID()
@@ -105,6 +109,27 @@ func InitRecord[T Blueprint](record T) {
 	record.SetCreatedAt(now)
 	record.SetUpdatedAt(now)
 }
+
+// allocatePlainPointers gives every nil, settable, named pointer field of a struct a zero
+// value, except a relation field (a pointer to a Blueprint).
+func allocatePlainPointers(value reflect.Value) {
+	if value.Kind() != reflect.Struct {
+		return
+	}
+	valueType := value.Type()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		if valueType.Field(i).Anonymous || field.Kind() != reflect.Pointer || !field.IsNil() || !field.CanSet() {
+			continue
+		}
+		if field.Type().Implements(blueprintType) {
+			continue // a relation: nil until a fetch resolves it
+		}
+		field.Set(reflect.New(field.Type().Elem()))
+	}
+}
+
+var blueprintType = reflect.TypeOf((*Blueprint)(nil)).Elem()
 
 // RandId returns a new public identifier. It is exported because a consumer seeding
 // rows that predate redifu needs to mint one per row.

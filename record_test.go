@@ -167,3 +167,39 @@ func TestRandIdIsDistinctAndWellFormed(t *testing.T) {
 		seen[randId] = struct{}{}
 	}
 }
+
+// ledgerShaped is an entity the way a consumer written against v1.0.0-rc.2 builds one:
+// plain pointer fields it reads (and persists) right after InitRecord, and a relation.
+type ledgerShaped struct {
+	*Record
+	ProcessedAt *time.Time
+	SettledFee  *int64
+	Window      *struct{ From, To int64 }
+	Owner       *Account `json:"-"` // a relation
+	note        *string
+}
+
+// InitRecord gives every plain nil pointer field a zero value, as rc.2 did, and leaves a
+// relation field and a field already set alone.
+func TestInitRecordAllocatesPlainPointersNotRelations(t *testing.T) {
+	entity := &ledgerShaped{}
+	InitRecord(entity)
+	if entity.Record == nil || entity.RandId == "" {
+		t.Fatal("no identity")
+	}
+	if entity.ProcessedAt == nil || !entity.ProcessedAt.IsZero() || entity.SettledFee == nil || *entity.SettledFee != 0 || entity.Window == nil {
+		t.Fatalf("plain pointer fields not allocated: %v %v %v", entity.ProcessedAt, entity.SettledFee, entity.Window)
+	}
+	if entity.Owner != nil {
+		t.Fatal("a relation field was allocated: it must stay nil until a fetch resolves it")
+	}
+	if entity.note != nil {
+		t.Fatal("an unexported field was set")
+	}
+	fee := int64(7)
+	kept := &ledgerShaped{SettledFee: &fee}
+	InitRecord(kept)
+	if kept.SettledFee != &fee {
+		t.Fatal("a pointer already set was replaced")
+	}
+}

@@ -68,8 +68,9 @@ before an entity goes out over an API; `RandId` is the public handle, drawn from
 
 `InitRecord` allocates the embedded `Record` and mints identity for a **new** entity.
 An entity being filled from a database row already has a randId — minting a fresh one
-orphans every index pointing at the old one. It allocates *embedded* pointers only: a
-named pointer field is left nil, because that is what a relation field must be until a
+orphans every index pointing at the old one. It allocates the embedded pointers and, as
+v1.0.0-rc.2 did, every other nil pointer field — except a relation field (a pointer to a
+`Blueprint`), which is left nil because that is what a relation field must be until a
 fetch resolves it.
 
 ---
