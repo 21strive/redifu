@@ -181,6 +181,9 @@ succeeds. Guard for it. Reads use `GETEX`, so anything that is being read stays 
 
 Full guide: `docs/plan-2026-08-30/01-relation.md`. Upgrade notes: `MIGRATION.md`.
 
+There is no one-to-many relation: a parent that owns a list keeps an index per parent
+(`terms:of:%s`). Why, and what would come first if it is ever built: `docs/one-to-many-relations.md`.
+
 ---
 
 ## Pipeline Discipline (critical invariant)

@@ -366,6 +366,8 @@ TTL is configurable at initialization.
 - Reading an item extends its TTL with `GETEX`, which needs Redis 6.2. Call
   `base.SetTouchOnRead(false)` on anything older.
 - Collection keys carry a Redis Cluster hash tag (`{feed:u1}`); item keys do not.
+- A relation points at one entity. A parent that owns a list (a booking's payment terms) keeps
+  an index per parent — see [`docs/one-to-many-relations.md`](docs/one-to-many-relations.md).
 
 ---
 
