@@ -299,6 +299,10 @@ binary-searches the run of members sharing that score — so a tie group of thou
 a handful of lookups. Scores cross into Lua through `formatScore`, which renders any
 float64 exactly; `Timeline.Score(item)` is the one way to compute the score of an item.
 
+Every Timeline read takes `WithLimit(n)`: a page of `n` for that fetch instead of
+`itemPerPage`, same `n+1` HasMore check (`FetchAll` ignores it). The page size is a property
+of a read, not of the index, which is why a top-up is sized from the read it completes.
+
 `Timeline.Tail` is the position of the index's last member in the same order (descending:
 `ZRANGE 0 0`, the lowest score and the smallest member tied there; ascending:
 `ZRANGE -1 -1`). A top-up seed continues from the tail, never from a client's cursor: the

@@ -535,6 +535,18 @@ middle of a feed cannot be mistaken for the end of it. `output.Dangling()` repor
 members of the page pointed at items that no longer exist — a steady non-zero value means your
 item TTL is too short relative to your index TTL.
 
+### One index, several page sizes
+
+A client that sends `per_page` is served from the same index: read every page of that request
+with `WithLimit(perPage)` and size its top-up from the same number. The index does not care
+which page sizes walked it; a walk by 20 and a walk by 100 read the same prefix.
+
+```go
+perPage := clamp(req.PerPage, 1, 100) // your bound — WithLimit takes what it is given
+output := PostTimeline.FetchFrom(cursor).WithParams(userRandId).WithLimit(perPage).Exec(ctx)
+// ...the loop as above, with perPage+1-len(output.Items()) and the same WithLimit on every re-read
+```
+
 ### Clients that send the last randId
 
 `Fetch(lastRandIds)` is the older contract: the client sends the randId of the last item it

@@ -93,6 +93,9 @@ hasMore  := output.HasMore()             // read from the index — drive "load 
 postTimeline.RemoveItem(ctx, post, userRandId)
 ```
 
+`WithLimit(n)` reads a page of `n` instead of the timeline's own page size, for that fetch only,
+so one index serves every `per_page` a client asks for.
+
 A `Cursor` is a position — the score and member of the last item the client saw — and the
 page after it exists whether or not that item is still in the index. Deleting an item, or
 moving it to another status, never sends a client back to page one.

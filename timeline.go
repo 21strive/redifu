@@ -527,6 +527,7 @@ type timelineFetchBuilder[T Blueprint] struct {
 	lastRandIds   []string
 	position      Cursor
 	fromPosition  bool
+	pageSize      int64
 	params        []string
 	processor     func(*T, []interface{})
 	processorArgs []interface{}
@@ -541,6 +542,18 @@ func (b *timelineFetchBuilder[T]) WithParams(params ...string) *timelineFetchBui
 func (b *timelineFetchBuilder[T]) WithProcessor(processor func(*T, []interface{}), args ...interface{}) *timelineFetchBuilder[T] {
 	b.processor = processor
 	b.processorArgs = args
+	return b
+}
+
+// WithLimit reads a page of n items for this fetch instead of the timeline's itemPerPage,
+// with the same one-extra-member HasMore check, so one index serves a per_page of 20 and
+// of 100 without a Timeline per page size. An n below 1 keeps itemPerPage; FetchAll
+// ignores it. Bound n yourself when it comes from a client.
+//
+// A top-up after a page read this way loads n + 1 - len(items) rows: the page size of
+// the read it completes, not itemPerPage.
+func (b *timelineFetchBuilder[T]) WithLimit(n int64) *timelineFetchBuilder[T] {
+	b.pageSize = n
 	return b
 }
 
@@ -613,6 +626,9 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 
 	// One extra member tells us whether a further page exists without a second query.
 	limit := b.timeline.itemPerPage
+	if b.pageSize >= 1 {
+		limit = b.pageSize
+	}
 	var members []string
 	var scores []float64
 	var usedCursor bool

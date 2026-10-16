@@ -114,6 +114,15 @@ type feedStore struct {
 	timeline *Timeline[*Post]
 	table    *feedTable
 	user     string
+	pageSize int64 // WithLimit for every read; 0 keeps itemPerPage
+}
+
+// perPage is the page size of the store's reads.
+func (s *feedStore) perPage() int64 {
+	if s.pageSize >= 1 {
+		return s.pageSize
+	}
+	return s.timeline.GetItemPerPage()
 }
 
 // seed is the documented seeder: up to limit rows that follow after (the head of the
@@ -181,7 +190,7 @@ func pageOf(output *FetchOutput[*Post], hasMore bool) feedPage {
 // topUp is the documented loop: while the page has run past the end of the index and the
 // index does not hold the end of the table, load what follows its tail and read again.
 func (s *feedStore) topUp(ctx context.Context, output *FetchOutput[*Post], read func() *FetchOutput[*Post]) (feedPage, error) {
-	perPage := s.timeline.GetItemPerPage()
+	perPage := s.perPage()
 
 	for topUps := 0; output.Error() == nil && !output.HasMore(); topUps++ {
 		end, err := s.timeline.ReachedEnd(ctx, s.user)
@@ -213,22 +222,22 @@ func (s *feedStore) topUp(ctx context.Context, output *FetchOutput[*Post], read 
 // page is the documented handler for position cursors.
 func (s *feedStore) page(ctx context.Context, cursor Cursor) (feedPage, error) {
 	read := func() *FetchOutput[*Post] {
-		return s.timeline.FetchFrom(cursor).WithParams(s.user).Exec(ctx)
+		return s.timeline.FetchFrom(cursor).WithParams(s.user).WithLimit(s.pageSize).Exec(ctx)
 	}
 	return s.topUp(ctx, read(), read)
 }
 
 // pageByRandId is the documented handler for clients that send randId cursors.
 func (s *feedStore) pageByRandId(ctx context.Context, lastRandIds []string) (feedPage, error) {
-	output := s.timeline.Fetch(lastRandIds).WithParams(s.user).Exec(ctx)
+	output := s.timeline.Fetch(lastRandIds).WithParams(s.user).WithLimit(s.pageSize).Exec(ctx)
 	reset := false
 	if errors.Is(output.Error(), ErrResetPagination) {
 		lastRandIds, reset = nil, true
-		output = s.timeline.Fetch(nil).WithParams(s.user).Exec(ctx)
+		output = s.timeline.Fetch(nil).WithParams(s.user).WithLimit(s.pageSize).Exec(ctx)
 	}
 
 	read := func() *FetchOutput[*Post] {
-		return s.timeline.Fetch(lastRandIds).WithParams(s.user).Exec(ctx)
+		return s.timeline.Fetch(lastRandIds).WithParams(s.user).WithLimit(s.pageSize).Exec(ctx)
 	}
 	page, err := s.topUp(ctx, output, read)
 	page.reset = reset

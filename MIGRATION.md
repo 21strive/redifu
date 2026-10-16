@@ -433,6 +433,14 @@ while one is the reference, `SetSortingReference` refuses a time field while ano
 set, and a series left on `createdAt` with another unit reports it on the first `AddItem` or
 `Fetch`. Segments, `FindGap` and `Scan` stay in milliseconds whatever the unit.
 
+## 23. A page size per Timeline read
+
+An addition. `timelineFetchBuilder.WithLimit(n int64)` reads a page of `n` for that one
+`Fetch` or `FetchFrom` instead of the timeline's `itemPerPage`, with the same one-extra-member
+`HasMore` check; `n < 1` keeps `itemPerPage` and `FetchAll` ignores it. One index now serves a
+`per_page` of 20 and of 100 — no Timeline per page size. Size the top-up of such a read from
+`n` (`n + 1 - len(items)`), and bound `n` yourself when a client chooses it.
+
 ---
 
 ## Checklist
