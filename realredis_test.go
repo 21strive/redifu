@@ -77,6 +77,12 @@ func TestRealRedis(t *testing.T) {
 		"FetchFromWalksAThousandTies":                        scenarioFetchFromWalksAThousandTies,
 		"TailIsTheLastMemberInTheTimelinesOrder":             scenarioTailIsTheLastMemberInTheTimelinesOrder,
 		"TailOfAnEmptyIndex":                                 scenarioTailOfAnEmptyIndex,
+		"DocumentedTimelineFlowWalksEveryRowOnce":            scenarioDocumentedTimelineFlowWalksEveryRowOnce,
+		"DocumentedTimelineFlowWithRandIdCursors":            scenarioDocumentedTimelineFlowWithRandIdCursors,
+		"DocumentedTimelineFlowWithANewItemMidScroll":        scenarioDocumentedTimelineFlowWithANewItemMidScroll,
+		"DocumentedTimelineFlowSurvivesARemovalMidScroll":    scenarioDocumentedTimelineFlowSurvivesARemovalMidScroll,
+		"DocumentedTimelineFlowRecoversAnIndexLostMidScroll": scenarioDocumentedTimelineFlowRecoversAnIndexLostMidScroll,
+		"ReachedEnd": scenarioReachedEnd,
 	}
 
 	for name, scenario := range scenarios {

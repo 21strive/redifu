@@ -38,8 +38,9 @@ You always construct a `Base[T]` first, then pass it into whichever collection y
   with a **cursor**, not page numbers: each page hands back a `NextCursor()` — the score and
   member of its last item — that the client sends to fetch the next page. The page after a
   cursor is read by position, so it exists even when that item has since left the index.
-  This is the only structure whose seeder takes a **`subtraction`** parameter (see below) —
-  because it stitches partial pages together as the user scrolls.
+  It is also the only structure that grows as the user scrolls: the index holds a prefix of
+  the table and is topped up from its tail whenever a page runs past it (see the fetch
+  handler below).
 
 - **`Sorted[T]`** — best for lists that are **near-finite and rarely change**, because a `Sorted`
   fetch returns the **entire collection in one go** (no pagination). Think leaderboards,
@@ -191,19 +192,12 @@ func InitRedis(redisClient redis.UniversalClient) {
 ### 3. Scanner functions
 
 Redifu does not define a scanner type — these are your own helpers, shared by every seeding
-function for the entity. Two per entity is the usual shape:
+function for the entity:
 
 ```go
-// single row — used to read a Timeline cursor reference
-func scanPostRow(row *sql.Row) (*Post, error) {
-    p := &Post{}
-    err := row.Scan(&p.RandId, &p.Title, &p.Content, &p.AuthorRandId, &p.CreatedAt)
-    return p, err
-}
-
-// one row out of many — used in the seeding loop
+// one row out of many — used in every seeding loop
 func scanPostRows(rows *sql.Rows) (*Post, error) {
-    p := &Post{}
+    p := &Post{Record: &redifu.Record{}} // filled from a row: allocate, do not mint
     err := rows.Scan(&p.RandId, &p.Title, &p.Content, &p.AuthorRandId, &p.CreatedAt)
     return p, err
 }
@@ -294,7 +288,7 @@ second Relation adds no round trip — all relations share one pipeline.
 Every item comes back fully resolved:
 
 ```go
-output := PostTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
+output := PostTimeline.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
 for _, p := range output.Items() {
     fmt.Println(p.Title, p.Author.Name)  // Author is populated
 }
@@ -380,36 +374,34 @@ Everything before step 4 only enqueues, so a whole page of seeding costs one rou
 
 ### Timeline
 
-The most involved of the four, because it carries a cursor. Use it as the template:
+A Timeline is never seeded in one go. It holds a **prefix** of the table — the head, then
+whatever scrolling has asked for since — and is extended from its last member whenever a
+page runs past it. So there is one seeder, and the head seed of a cold index and every
+top-up are the same query with a different anchor:
 
 ```go
-func seedPostFeed(ctx context.Context, userRandId string, subtraction int64, lastRandId string) error {
-    var query string
+// seedPostFeed loads up to limit posts that follow `after` in the feed's order — the
+// newest posts when after is the zero Cursor — and records whether they reach the end
+// of the table.
+func seedPostFeed(ctx context.Context, userRandId string, after redifu.Cursor, limit int64) error {
+    // The keyset compares exactly what the index sorts by:
+    //  - a time.Time sorting reference is scored in Unix milliseconds, so the column is
+    //    truncated to the millisecond;
+    //  - members that share a score are ordered by their bytes, so the randid is
+    //    compared and ordered with COLLATE "C".
+    // Compare the raw column, or the randid under your database's default collation,
+    // and rows inside one millisecond, or randids differing only in case, are skipped
+    // or loaded twice.
+    query := `
+        SELECT p.randid, p.title, p.content, p.author_randid, p.created_at
+        FROM post_view p
+        WHERE p.user_id = $1`
     args := []interface{}{userRandId}
-
-    if lastRandId == "" {
-        // First page
-        query = `
-            SELECT p.randid, p.title, p.content, p.author_randid, p.created_at
-            FROM post_view p
-            WHERE p.user_id = $1
-            ORDER BY p.created_at DESC`
-    } else {
-        // Find cursor reference to get its score
-        var cursorTime time.Time
-        row := db.QueryRowContext(ctx, `SELECT created_at FROM posts WHERE randid = $1`, lastRandId)
-        if err := row.Scan(&cursorTime); err != nil {
-            return err
-        }
-        query = `
-            SELECT p.randid, p.title, p.content, p.author_randid, p.created_at
-            FROM post_view p
-            WHERE p.user_id = $1 AND p.created_at < $2
-            ORDER BY p.created_at DESC`
-        args = append(args, cursorTime)
+    if !after.IsZero() {
+        query += ` AND (date_trunc('milliseconds', p.created_at), p.randid COLLATE "C") < ($2, $3)`
+        args = append(args, time.UnixMilli(int64(after.Score)).UTC(), after.Member)
     }
-
-    limit := PostTimeline.GetItemPerPage() - subtraction
+    query += ` ORDER BY date_trunc('milliseconds', p.created_at) DESC, p.randid COLLATE "C" DESC`
     query += fmt.Sprintf(" LIMIT %d", limit)
 
     rows, err := db.QueryContext(ctx, query, args...)
@@ -419,8 +411,14 @@ func seedPostFeed(ctx context.Context, userRandId string, subtraction int64, las
     defer rows.Close()
 
     pipe := redisClient.Pipeline()
-    var count int64
+    if after.IsZero() {
+        // A head seed starts the index over. A :lastpage marker can outlive the index
+        // it described (the index TTL is set here, the marker's later); left in place
+        // it would end the feed at this head.
+        PostTimeline.UnmarkLastPage(ctx, pipe, userRandId)
+    }
 
+    var count int64
     for rows.Next() {
         item, err := scanPostRows(rows)
         if err != nil {
@@ -434,17 +432,13 @@ func seedPostFeed(ctx context.Context, userRandId string, subtraction int64, las
         return err
     }
 
-    isFirstPage := lastRandId == ""
-
-    if isFirstPage && count == 0 {
-        PostTimeline.MarkEmpty(ctx, pipe, userRandId)
-    } else if isFirstPage && count < PostTimeline.GetItemPerPage() {
-        PostTimeline.MarkFirstPage(ctx, pipe, userRandId)
-    } else if !isFirstPage && subtraction+count < PostTimeline.GetItemPerPage() {
-        PostTimeline.MarkLastPage(ctx, pipe, userRandId)
+    switch {
+    case after.IsZero() && count == 0:
+        PostTimeline.MarkEmpty(ctx, pipe, userRandId)    // nothing in the table for this feed
+    case count < limit:
+        PostTimeline.MarkLastPage(ctx, pipe, userRandId) // the index now reaches the end of the table
     }
-
-    if isFirstPage {
+    if after.IsZero() {
         PostTimeline.SetExpiration(ctx, pipe, userRandId)
     }
 
@@ -453,65 +447,121 @@ func seedPostFeed(ctx context.Context, userRandId string, subtraction int64, las
 }
 ```
 
+The keyset needs an index to be fast: either an expression index on
+`(user_id, date_trunc('milliseconds', created_at) DESC, randid COLLATE "C" DESC)`, or a column
+that already holds milliseconds, compared directly. For an `int64` sorting reference the score
+is the value itself: compare the column with `int64(after.Score)` and drop the truncation.
+
 ---
 
 ## Standard pattern: Timeline fetch handler
 
+The client sends the cursor of the last page it received — `""` for the first page — and gets
+back the cursor of this one:
+
 ```go
-func GetPostFeed(ctx context.Context, userRandId string, lastRandIds []string) ([]Post, string, string, error) {
-    needsSeed, err := PostTimeline.RequiresSeeding(ctx, int64(len(lastRandIds)), userRandId)
+// maxTopUps caps the database reads one request spends extending the index. One is
+// enough unless the index lost its end while the client was deep in the feed.
+const maxTopUps = 3
+
+type FeedPage struct {
+    Posts   []*Post
+    Cursor  string // NextCursor().String(): the client sends it back for the next page
+    HasMore bool
+}
+
+func GetPostFeed(ctx context.Context, userRandId string, token string) (*FeedPage, error) {
+    cursor, err := redifu.ParseCursor(token) // "" is the zero Cursor: the first page
     if err != nil {
-        return nil, "", "", err
+        return nil, err // ErrInvalidCursor: a client error
     }
+    perPage := PostTimeline.GetItemPerPage()
 
-    if needsSeed {
-        if err := seedPostFeed(ctx, userRandId, 0, ""); err != nil {
-            return nil, "", "", err
+    output := PostTimeline.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
+    for topUps := 0; output.Error() == nil && !output.HasMore(); topUps++ {
+        // The page ran past the end of the index. If the index holds the end of the
+        // table there is nothing more to load.
+        end, err := PostTimeline.ReachedEnd(ctx, userRandId)
+        if err != nil {
+            return nil, err
         }
-    }
-
-    output := PostTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
-
-    // ErrResetPagination: the client had a cursor, but none of the ids it passed are
-    // in the index any more — it expired mid-pagination, was purged, or those items
-    // were removed. Discard the cursor and re-seed from the first page. Redifu never
-    // silently serves page one in this case, because the client would receive items
-    // it already has with no way to know.
-    if errors.Is(output.Error(), redifu.ErrResetPagination) {
-        if err := seedPostFeed(ctx, userRandId, 0, ""); err != nil {
-            return nil, "", "", err
+        if end {
+            break
         }
-        output = PostTimeline.Fetch(nil).WithParams(userRandId).Exec(ctx)
-    }
+        if topUps == maxTopUps {
+            // Still short of the client's position: answer what there is. HasMore is
+            // true, so the client asks again and the next request carries on.
+            return &FeedPage{Posts: output.Items(), Cursor: output.NextCursor().String(), HasMore: true}, nil
+        }
 
+        // Extend the index from where it really ends — never from the client's cursor,
+        // which may lie beyond it. On a cold index the tail is the zero Cursor, so this
+        // loads the head.
+        tail, _, err := PostTimeline.Tail(ctx, userRandId)
+        if err != nil {
+            return nil, err
+        }
+        // One row more than the page still needs, so HasMore can be read from the index.
+        if err := seedPostFeed(ctx, userRandId, tail, perPage+1-int64(len(output.Items()))); err != nil {
+            return nil, err
+        }
+        output = PostTimeline.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
+    }
     if output.Error() != nil {
-        return nil, "", "", output.Error()
+        return nil, output.Error()
     }
 
-    return output.Items(), output.ValidLastId(), output.Position(), nil
+    return &FeedPage{Posts: output.Items(), Cursor: output.NextCursor().String(), HasMore: output.HasMore()}, nil
 }
 ```
 
-**Drive "load more" from `output.HasMore()`, not from how many items came back.**
-`HasMore()` is read from the index before any item is loaded, so items that have expired out of
-`Base` in the middle of a feed cannot be mistaken for the end of it. `output.Dangling()` reports
-how many members of the page pointed at items that no longer exist — a steady non-zero value
-means your item TTL is too short relative to your index TTL.
+What each step guarantees:
 
-### The `subtraction` parameter
+- **The index is always a prefix of the table.** It is seeded from the head and only ever
+  extended from its tail, so a walk never skips a row. A seed anchored on the client's cursor
+  could: after a purge or an expiry the index restarts at the head, and rows between its tail
+  and the cursor would never be loaded.
+- **The first walk loads each row once; every walk after it costs no query.** A 50-row table
+  at 20 per page is three queries — the head (21 rows), then 20, then the last 9 — and
+  `MarkLastPage` stops the next walk at the end without asking the database.
+- **A cursor survives the item it names.** `FetchFrom` reads by position, so a post deleted, or
+  moved to another status, while the client was reading does not send it back to page one.
+- **New items do not repeat in a scroll in progress.** An item added at the head sorts before
+  the client's cursor, so it shows up on the next fresh first page instead.
 
-**`subtraction` is a Timeline-only concept** — `Sorted`, `Page` and `TimeSeries` never stitch a
-partial page across a cursor, so they don't need it.
+**Drive "load more" from `HasMore`, not from how many items came back.** `HasMore()` is read
+from the index before any item is loaded, so items that have expired out of `Base` in the
+middle of a feed cannot be mistaken for the end of it. `output.Dangling()` reports how many
+members of the page pointed at items that no longer exist — a steady non-zero value means your
+item TTL is too short relative to your index TTL.
 
-`subtraction` is the number of items already present in Redis for the page being seeded. You
-subtract it from your SQL `LIMIT` so the total reaches exactly `itemPerPage`:
+### Clients that send the last randId
 
+`Fetch(lastRandIds)` is the older contract: the client sends the randId of the last item it
+received. It reads the page after the newest of those randIds still in the index, and returns
+`ErrResetPagination` when none of them is — the item was removed, or the index was lost. The
+top-up loop is the same; only the read and the reset differ:
+
+```go
+output := PostTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
+if errors.Is(output.Error(), redifu.ErrResetPagination) {
+    // The client's position is gone. Serve the first page and tell it it starts over —
+    // never page one silently, which would repeat items it already has.
+    lastRandIds, reset = nil, true
+    output = PostTimeline.Fetch(nil).WithParams(userRandId).Exec(ctx)
+}
+// ...then the loop above, re-reading with Fetch(lastRandIds) and returning
+// output.ValidLastId() as the next cursor.
 ```
-itemPerPage = 20, items already in Redis = 5 → subtraction = 5
-LIMIT 15   (itemPerPage - subtraction)
-```
 
-Pass `subtraction = 0` on a first-page seed or when the sorted set is empty.
+Prefer `FetchFrom` for anything new: a position cursor never forces a restart.
+
+### How much a top-up loads
+
+`perPage + 1 - len(output.Items())`: what the page still lacks, plus one row so `HasMore()` can
+be read from the index on the next fetch. It is a Timeline-only notion — `Sorted`, `Page` and
+`TimeSeries` never extend a partial index. (It replaces the old `subtraction` parameter, which
+fed `itemPerPage - subtraction` to the SQL `LIMIT` and had no room for the extra row.)
 
 ---
 
@@ -846,7 +896,7 @@ func sanitizePost(p *Post, args []interface{}) {
 }
 
 output := PostTimeline.
-    Fetch(lastRandIds).
+    FetchFrom(cursor).
     WithParams(userRandId).
     WithProcessor(sanitizePost).
     Exec(ctx)
@@ -861,7 +911,7 @@ func applyUserContext(p *Post, args []interface{}) {
 }
 
 output := PostTimeline.
-    Fetch(lastRandIds).
+    FetchFrom(cursor).
     WithParams(userRandId).
     WithProcessor(applyUserContext, viewerRandId).
     Exec(ctx)
@@ -999,12 +1049,16 @@ every account in it reflects the change — no feed purged, no page reseeded, an
 - Do not call `pipe.Exec()` inside a function that receives `pipe` as a parameter
 - Do not expect `RemoveItem` or `Purge` to delete an item — they only touch the index; deleting the entity is `Base.Del`, paired with a `RemoveItem` in the same pipeline
 - Do not use `AddItem` to update an item's contents — it only places the item into the index (and refreshes its TTL); use `Base.Set`
-- Do not ignore `redifu.ErrResetPagination` — always handle it by discarding the cursor and re-seeding from page one
+- Do not ignore `redifu.ErrResetPagination` from `Fetch(lastRandIds)` — serve the first page and tell the client it starts over (or move it to `FetchFrom`, which never needs that)
+- Do not seed a Timeline top-up from the client's cursor — seed from `Tail`, so the index stays a prefix of the table; a cursor can lie beyond the tail after the index lost its end
+- Do not drive a Timeline with `RequiresSeeding` — its documented handler stopped after page one; use the `FetchFrom` / `ReachedEnd` / `Tail` loop
+- Do not keyset a Timeline seed on the raw timestamp or on the default collation — compare `date_trunc('milliseconds', …)` (the score of a time field) and `randid COLLATE "C"` (the order Redis keeps ties in)
+- Do not forget `UnmarkLastPage` in a head seed — a `:lastpage` marker can outlive the index it described
 - Do not treat a short page as the end of a feed — use `output.HasMore()`, which is read from the index rather than from how many items survived hydration
 - Do not treat `redifu.ErrNotIngested` from `AddItem` as a failure — the item was stored and its TTL refreshed; it just did not enter the index yet
 - Do not ignore the error from a constructor, `Count` or `SetSortingReference`
 - Do not give a collection's sorted set a TTL longer than (or equal to) its `Base` TTL — `Base` must outlive the index
-- Do not apply `subtraction` to anything but a Timeline seeding function — it is a Timeline-only concept
+- Do not size a Timeline top-up as a whole page — load `perPage + 1 - len(output.Items())` rows, so `HasMore()` is read from the index
 - Do not call `pipe.Exec` inside your seeding loop — enqueue everything, execute once at the end
 - Do not seed a `TimeSeries` range without `AddSegment` — the range will be re-queried on every request
 - Do not sort by a snowflake id — an `int64` score beyond 2^53 is refused, because a float64 cannot hold it exactly and the index would reorder itself silently

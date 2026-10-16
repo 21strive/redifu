@@ -10,47 +10,54 @@ import (
 // FeedPage is what the handler hands back to the transport layer.
 type FeedPage struct {
 	Posts   []*Post
-	Cursor  string // pass back as lastRandIds on the next call
+	Cursor  redifu.Cursor // Cursor.String() goes to the client; ParseCursor reads it back
 	HasMore bool
-	Reset   bool // the client's cursor was stale; it should start over
 }
 
-// GetPostFeed is the read path.
+// maxTopUps caps the database reads one request spends extending the feed. One is
+// enough unless the index lost its end while the client was deep in the feed.
+const maxTopUps = 3
+
+// GetPostFeed is the read path: the page that follows cursor, the zero Cursor for the
+// first page.
 //
 // Nothing in here resolves a relation by hand. By the time Fetch returns, every post
 // has post.Author filled in, and every author has author.Organisation filled in — two
 // levels, one batched read per level, each distinct key read once for the whole page.
-func (s *Store) GetPostFeed(ctx context.Context, userRandId string, lastRandIds []string) (*FeedPage, error) {
-	needsSeed, err := s.PostFeed.RequiresSeeding(ctx, int64(len(lastRandIds)), userRandId)
-	if err != nil {
-		return nil, err
-	}
-	if needsSeed {
-		if err := s.SeedPostFeed(ctx, userRandId, 0, ""); err != nil {
+func (s *Store) GetPostFeed(ctx context.Context, userRandId string, cursor redifu.Cursor) (*FeedPage, error) {
+	perPage := s.PostFeed.GetItemPerPage()
+
+	// The page after the cursor, read by position: a post deleted, or moved out of this
+	// feed, since the client read it does not send the client back to page one.
+	output := s.PostFeed.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
+
+	// The index holds a prefix of the table. A page that runs past its end is topped up
+	// from where the index really ends — its Tail — never from the client's cursor, which
+	// may lie beyond it after a purge or an expiry. A cold index has no tail, so the
+	// first top-up loads the head.
+	for topUps := 0; output.Error() == nil && !output.HasMore(); topUps++ {
+		end, err := s.PostFeed.ReachedEnd(ctx, userRandId)
+		if err != nil {
 			return nil, err
 		}
-	}
+		if end {
+			break
+		}
+		if topUps == maxTopUps {
+			// Still short of the client's position. HasMore stays true, so the client
+			// asks again and the next request carries on from here.
+			return &FeedPage{Posts: output.Items(), Cursor: output.NextCursor(), HasMore: true}, nil
+		}
 
-	output := s.PostFeed.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
-
-	// None of the ids the client sent are in the index any more — it expired
-	// mid-scroll, was purged, or those posts were removed. redifu refuses to quietly
-	// serve page one here, because the client would receive items it already has with
-	// no way to tell.
-	if errors.Is(output.Error(), redifu.ErrResetPagination) {
-		if err := s.SeedPostFeed(ctx, userRandId, 0, ""); err != nil {
+		tail, _, err := s.PostFeed.Tail(ctx, userRandId)
+		if err != nil {
 			return nil, err
 		}
-		output = s.PostFeed.Fetch(nil).WithParams(userRandId).Exec(ctx)
-		if output.Error() != nil {
-			return nil, output.Error()
+		// One row more than the page still needs, so HasMore is read from the index.
+		if err := s.SeedPostFeed(ctx, userRandId, tail, perPage+1-int64(len(output.Items()))); err != nil {
+			return nil, err
 		}
-		return &FeedPage{
-			Posts:   output.Items(),
-			Cursor:  output.ValidLastId(),
-			HasMore: output.HasMore(),
-			Reset:   true,
-		}, nil
+		output = s.PostFeed.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
 	}
 
 	if output.Error() != nil {
@@ -63,7 +70,7 @@ func (s *Store) GetPostFeed(ctx context.Context, userRandId string, lastRandIds 
 	// those; a steadily non-zero value means itemTTL is too short next to indexTTL.
 	return &FeedPage{
 		Posts:   output.Items(),
-		Cursor:  output.ValidLastId(),
+		Cursor:  output.NextCursor(),
 		HasMore: output.HasMore(),
 	}, nil
 }

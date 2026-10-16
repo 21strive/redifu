@@ -293,6 +293,49 @@ clients can move from randId cursors to position cursors one request at a time. 
 cursor script now reads the page after the cursor's rank instead of re-reading its whole tie
 group; the pages it returns are unchanged.
 
+## 16. The Timeline flow: top up from the tail
+
+The Timeline handler in the previous `readme.md`, `CLAUDE.consumer.md` and `examples/feed`
+called `RequiresSeeding(len(lastRandIds))` and seeded the first page only. On a 50-row table,
+page one came back with `HasMore() == false` and page two was empty, so "load more" stopped
+after twenty rows — and a warm first page still asked to be seeded on every read. Nothing in
+the library changes behaviour here; the documented flow does, and two helpers back it:
+
+```go
+output := timeline.FetchFrom(cursor).WithParams(userId).Exec(ctx)
+for topUps := 0; output.Error() == nil && !output.HasMore(); topUps++ {
+    end, _ := timeline.ReachedEnd(ctx, userId)  // :blankpage, or members and :lastpage
+    if end || topUps == maxTopUps { break }     // capped: answer HasMore = true, see CLAUDE.consumer.md
+    tail, _, _ := timeline.Tail(ctx, userId)    // zero Cursor on a cold index → head seed
+    seed(ctx, userId, tail, perPage+1-int64(len(output.Items())))
+    output = timeline.FetchFrom(cursor).WithParams(userId).Exec(ctx)
+}
+```
+
+| New | |
+|---|---|
+| `Timeline.ReachedEnd(ctx, params...) (bool, error)` | the index holds the end of the data: `:blankpage` on an empty index, `:lastpage` on one with members. A `:lastpage` on an empty index is stale and ignored. One round trip |
+
+What your seeder changes:
+
+- **One seeder, anchored on a `Cursor`.** The head seed is the zero Cursor; a top-up is the
+  feed's `Tail`. Never anchor on the client's cursor: after a purge or an expiry it can lie
+  beyond the tail, and the rows in between would never be loaded.
+- **Ask for one row more than the page lacks** (`perPage + 1 - len(items)`) so `HasMore()` is
+  read from the index. `subtraction` is gone.
+- **`MarkLastPage` whenever the database returns fewer rows than asked**, the head seed
+  included. `MarkFirstPage` is no longer needed.
+- **The head seed calls `UnmarkLastPage`.** The index TTL is set by the head seed and the
+  marker's by a later top-up, so the marker can outlive the index; left in place it ends the
+  next walk at the head.
+- **Keyset on exactly what the index sorts by**: the score (`Timeline.Score`; Unix
+  milliseconds for a time field, so `date_trunc('milliseconds', col)`) and the member in byte
+  order (`randid COLLATE "C"`). Compared on the raw column or the default collation, rows
+  inside one millisecond — a batch inserted in one transaction shares `now()` — or randids
+  that differ in case are skipped or repeated.
+
+`RequiresSeeding` on `Timeline` is deprecated; it still answers as before.
+
 ---
 
 ## Checklist
@@ -305,7 +348,8 @@ group; the pages it returns are unchanged.
 4. Handle `ErrNotIngested` from `AddItem`.
 5. Replace `errors.Is(err, redis.Nil)` with `errors.Is(err, redifu.ErrNotFound)`.
 6. Take the error from `Count` and `SetSortingReference`.
-7. Switch "load more" from `Position() != LastPage` to `HasMore()`.
+7. Switch "load more" from `Position() != LastPage` to `HasMore()`, and replace a Timeline
+   handler built on `RequiresSeeding` with the top-up flow (section 16).
 8. Handle `ErrResetPagination` on the output of `Fetch(lastRandIds)` — or move the client to
    position cursors (`FetchFrom`, `NextCursor`), which never send it back to page one.
 9. If you run Redis below 6.2, call `SetTouchOnRead(false)` on every `Base`.

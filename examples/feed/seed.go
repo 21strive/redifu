@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/21strive/redifu"
 )
 
 // seedQuery selects the post and, in the same pass, the two entities behind it.
@@ -13,9 +15,6 @@ import (
 // relations resolve from Redis on the very first fetch. Join only as deep as the
 // relations you actually need filled — anything you do not warm comes back nil until
 // something else writes that key.
-//
-// ORDER BY published matches SetSortingReference("Published"). If the two disagree,
-// the sorted set is ordered by one field and paginated by another.
 const seedQuery = `
 	SELECT p.randid, p.title, p.body, p.published, p.author_randid,
 	       a.randid, a.name, a.handle, a.organisation_randid,
@@ -24,6 +23,13 @@ const seedQuery = `
 	JOIN accounts a      ON a.randid = p.author_randid
 	JOIN organisations o ON o.randid = a.organisation_randid
 	WHERE p.feed_user_randid = $1`
+
+// feedKey is what the index sorts by, as SQL: Published, which redifu scores in Unix
+// milliseconds (SetSortingReference("Published") in store.go), then the randid in byte
+// order, which is how Redis orders members that share a score. The ORDER BY and the
+// keyset both use it; comparing the raw column, or the randid under the database's
+// default collation, would skip or repeat rows at page boundaries.
+const feedKey = `date_trunc('milliseconds', p.published), p.randid COLLATE "C"`
 
 // scanFeedRow reads one joined row into three separate entities.
 //
@@ -46,27 +52,24 @@ func scanFeedRow(rows *sql.Rows) (*Post, *Account, *Organisation, error) {
 	return post, account, organisation, nil
 }
 
-// SeedPostFeed fills one user's feed from the database.
+// SeedPostFeed loads up to limit posts that follow `after` in the feed's order — the
+// newest posts for the zero Cursor — and records whether they reach the end of the table.
 //
-// subtraction is how many items Redis already holds for the page being stitched; it
-// comes off the SQL LIMIT so the page reaches exactly itemPerPage. Pass 0 on a
-// first-page seed.
-func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, subtraction int64, lastRandId string) error {
+// GetPostFeed calls it with the feed's Tail, so the index only ever grows from where it
+// really ends: it always holds a prefix of the table, and a walk never skips a row.
+func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, after redifu.Cursor, limit int64) error {
 	query := seedQuery
 	args := []interface{}{userRandId}
 
-	if lastRandId != "" {
-		// Read the cursor's score from the same column the index is sorted by.
-		var cursorPublished time.Time
-		row := s.db.QueryRowContext(ctx, `SELECT published FROM posts WHERE randid = $1`, lastRandId)
-		if err := row.Scan(&cursorPublished); err != nil {
-			return err
-		}
-		query += ` AND p.published < $2`
-		args = append(args, cursorPublished)
+	if !after.IsZero() {
+		// Strictly after the anchor, in exactly the index's order. The anchor's score is
+		// the one the index stores, so it is turned back into a timestamp rather than
+		// read from the database.
+		query += ` AND (` + feedKey + `) < ($2, $3)`
+		args = append(args, time.UnixMilli(int64(after.Score)).UTC(), after.Member)
 	}
 
-	query += fmt.Sprintf(" ORDER BY p.published DESC LIMIT %d", s.PostFeed.GetItemPerPage()-subtraction)
+	query += fmt.Sprintf(` ORDER BY date_trunc('milliseconds', p.published) DESC, p.randid COLLATE "C" DESC LIMIT %d`, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -75,6 +78,15 @@ func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, subtraction
 	defer rows.Close()
 
 	pipe := s.redis.Pipeline()
+
+	if after.IsZero() {
+		// A head seed starts the index over. A :lastpage marker can outlive the index it
+		// described — the index TTL is set here, the marker's by a later top-up — and left
+		// in place it would end the feed at this head.
+		if err := s.PostFeed.UnmarkLastPage(ctx, pipe, userRandId); err != nil {
+			return err
+		}
+	}
 
 	// The same author appears on many rows. Deduplicating is not needed for
 	// correctness — same key, same value — but it keeps the pipeline small.
@@ -120,26 +132,21 @@ func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, subtraction
 		return err
 	}
 
-	// State markers, so the next request knows whether this feed needs seeding again.
-	isFirstPage := lastRandId == ""
-	perPage := s.PostFeed.GetItemPerPage()
-
+	// State markers, so the next request knows whether there is more to load.
 	switch {
-	case isFirstPage && count == 0:
+	case after.IsZero() && count == 0:
+		// Nothing in the table for this feed.
 		if err := s.PostFeed.MarkEmpty(ctx, pipe, userRandId); err != nil {
 			return err
 		}
-	case isFirstPage && count < perPage:
-		if err := s.PostFeed.MarkFirstPage(ctx, pipe, userRandId); err != nil {
-			return err
-		}
-	case !isFirstPage && subtraction+count < perPage:
+	case count < limit:
+		// The table ran out before the limit: the index now reaches its end.
 		if err := s.PostFeed.MarkLastPage(ctx, pipe, userRandId); err != nil {
 			return err
 		}
 	}
 
-	if isFirstPage {
+	if after.IsZero() {
 		if err := s.PostFeed.SetExpiration(ctx, pipe, userRandId); err != nil {
 			return err
 		}

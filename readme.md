@@ -226,43 +226,75 @@ than left to a comment.
 
 ## Seeding
 
-Redifu never touches your database. When a key has no data, you run your own SQL and feed the
-rows in through redifu's public methods:
+Redifu never touches your database. When a collection has no data, you run your own SQL and
+feed the rows in through redifu's public methods.
+
+A Timeline holds a prefix of the table — the head, then whatever scrolling has asked for — and
+is topped up from its tail whenever a page runs past it:
 
 ```go
-func GetFeed(ctx context.Context, userRandId string, lastRandIds []string) ([]*Post, error) {
-    needsSeed, err := postTimeline.RequiresSeeding(ctx, int64(len(lastRandIds)), userRandId)
-    if err != nil {
-        return nil, err
-    }
-
-    if needsSeed {
-        if err := seedFeed(ctx, userRandId); err != nil {
-            return nil, err
-        }
-    }
-
-    output := postTimeline.Fetch(lastRandIds).WithParams(userRandId).Exec(ctx)
-    return output.Items(), output.Error()
+type FeedPage struct {
+    Posts   []*Post
+    Next    redifu.Cursor // Next.String() goes to the client and comes back as its cursor
+    HasMore bool
 }
 
-func seedFeed(ctx context.Context, userRandId string) error {
-    rows, err := db.QueryContext(ctx, `
+func GetFeed(ctx context.Context, userRandId string, cursor redifu.Cursor) (*FeedPage, error) {
+    perPage := postTimeline.GetItemPerPage()
+
+    output := postTimeline.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
+    for topUps := 0; output.Error() == nil && !output.HasMore(); topUps++ {
+        end, err := postTimeline.ReachedEnd(ctx, userRandId) // the index already holds the end
+        if err != nil {
+            return nil, err
+        }
+        if end {
+            break
+        }
+        if topUps == 3 { // capped: the client asks again and the next request carries on
+            return &FeedPage{output.Items(), output.NextCursor(), true}, nil
+        }
+        tail, _, err := postTimeline.Tail(ctx, userRandId) // the zero Cursor on a cold index
+        if err != nil {
+            return nil, err
+        }
+        if err := seedFeed(ctx, userRandId, tail, perPage+1-int64(len(output.Items()))); err != nil {
+            return nil, err
+        }
+        output = postTimeline.FetchFrom(cursor).WithParams(userRandId).Exec(ctx)
+    }
+    if output.Error() != nil {
+        return nil, output.Error()
+    }
+    return &FeedPage{output.Items(), output.NextCursor(), output.HasMore()}, nil
+}
+
+// seedFeed loads up to limit posts that follow `after` — the newest posts for the zero
+// Cursor — keyed on exactly what the index sorts by: milliseconds, then randid byte order.
+func seedFeed(ctx context.Context, userRandId string, after redifu.Cursor, limit int64) error {
+    query, args := `
         SELECT p.randid, p.title, p.author_randid, p.created_at
         FROM posts p
-        WHERE p.user_id = $1
-        ORDER BY p.created_at DESC
-        LIMIT 20`, userRandId)
+        WHERE p.user_id = $1`, []interface{}{userRandId}
+    if !after.IsZero() {
+        query += ` AND (date_trunc('milliseconds', p.created_at), p.randid COLLATE "C") < ($2, $3)`
+        args = append(args, time.UnixMilli(int64(after.Score)).UTC(), after.Member)
+    }
+    query += fmt.Sprintf(` ORDER BY date_trunc('milliseconds', p.created_at) DESC, p.randid COLLATE "C" DESC LIMIT %d`, limit)
+
+    rows, err := db.QueryContext(ctx, query, args...)
     if err != nil {
         return err
     }
     defer rows.Close()
 
     pipe := redisClient.Pipeline()
+    if after.IsZero() {
+        postTimeline.UnmarkLastPage(ctx, pipe, userRandId) // a head seed starts the index over
+    }
     var count int64
-
     for rows.Next() {
-        p := &Post{}
+        p := &Post{Record: &redifu.Record{}}
         if err := rows.Scan(&p.RandId, &p.Title, &p.AuthorRandId, &p.CreatedAt); err != nil {
             return err
         }
@@ -274,20 +306,24 @@ func seedFeed(ctx context.Context, userRandId string) error {
         return err
     }
 
-    if count == 0 {
+    switch {
+    case after.IsZero() && count == 0:
         postTimeline.MarkEmpty(ctx, pipe, userRandId)
-    } else if count < postTimeline.GetItemPerPage() {
-        postTimeline.MarkFirstPage(ctx, pipe, userRandId)
+    case count < limit:
+        postTimeline.MarkLastPage(ctx, pipe, userRandId) // the index reaches the end of the table
     }
-    postTimeline.SetExpiration(ctx, pipe, userRandId)
+    if after.IsZero() {
+        postTimeline.SetExpiration(ctx, pipe, userRandId)
+    }
 
     _, err = pipe.Exec(ctx)
     return err
 }
 ```
 
-One pipeline, one round trip. `CLAUDE.consumer.md` carries the same pattern for `Sorted`,
-`Page` and `TimeSeries`, plus the cursor handling a paged Timeline needs.
+One pipeline, one round trip per seed; the first walk of a feed loads each row once and every
+walk after it is served from Redis. `CLAUDE.consumer.md` explains each step, and carries the
+pattern for `Sorted`, `Page` and `TimeSeries` and for clients that still send randId cursors.
 
 ---
 
@@ -331,7 +367,8 @@ It is part of `go build ./...` and has its own tests, so it cannot drift away fr
 
 Current release: see [`MIGRATION.md`](MIGRATION.md) — constructors return errors, relations move
 onto `Base` and nest, `json:"-"` is enforced, ingest is a single atomic script, and pagination no
-longer mistakes an expired item for the end of a feed.
+longer mistakes an expired item for the end of a feed. A Timeline is read by position cursor
+and grows by top-up from its tail (sections 15 and 16).
 
 ## Breaking changes on `redifu-simplified`
 

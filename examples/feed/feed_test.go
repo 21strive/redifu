@@ -40,8 +40,10 @@ func seedByHand(t *testing.T, store *Store, client redis.UniversalClient, userRa
 			t.Fatalf("IngestItem: %v", err)
 		}
 	}
-	if err := store.PostFeed.MarkFirstPage(ctx, pipe, userRandId); err != nil {
-		t.Fatalf("MarkFirstPage: %v", err)
+	// The table holds nothing else: the index reaches its end, so GetPostFeed never
+	// needs the database these tests do not have.
+	if err := store.PostFeed.MarkLastPage(ctx, pipe, userRandId); err != nil {
+		t.Fatalf("MarkLastPage: %v", err)
 	}
 	if err := store.PostFeed.SetExpiration(ctx, pipe, userRandId); err != nil {
 		t.Fatalf("SetExpiration: %v", err)
@@ -88,7 +90,7 @@ func TestFeedResolvesBothRelationLevels(t *testing.T) {
 	_, _, posts := fixture(t, store)
 	seedByHand(t, store, client, "u1", posts...)
 
-	page, err := store.GetPostFeed(ctx, "u1", nil)
+	page, err := store.GetPostFeed(ctx, "u1", redifu.Cursor{})
 	if err != nil {
 		t.Fatalf("GetPostFeed: %v", err)
 	}
@@ -145,7 +147,7 @@ func TestRenamingTheOrganisationReachesEveryPost(t *testing.T) {
 		t.Fatalf("RenameOrganisation: %v", err)
 	}
 
-	page, err := store.GetPostFeed(ctx, "u1", nil)
+	page, err := store.GetPostFeed(ctx, "u1", redifu.Cursor{})
 	if err != nil {
 		t.Fatalf("GetPostFeed: %v", err)
 	}
@@ -169,7 +171,7 @@ func TestCreatePostEntersASeededFeed(t *testing.T) {
 		t.Fatalf("CreatePost: %v", err)
 	}
 
-	page, err := store.GetPostFeed(ctx, "u1", nil)
+	page, err := store.GetPostFeed(ctx, "u1", redifu.Cursor{})
 	if err != nil {
 		t.Fatalf("GetPostFeed: %v", err)
 	}
@@ -210,14 +212,14 @@ func TestDeletePostRemovesEntityAndIndexMember(t *testing.T) {
 		t.Fatal("the entity key survived DeletePost")
 	}
 
-	// Removing an item clears the page markers, so the feed no longer knows where its
-	// boundaries are and asks to be rebuilt on the next read. GetPostFeed would call
-	// SeedPostFeed here — which is why this test checks the state directly instead.
-	needsSeed, errSeed := store.PostFeed.RequiresSeeding(ctx, 0, "u1")
-	if errSeed != nil {
-		t.Fatalf("RequiresSeeding: %v", errSeed)
+	// Removing an item clears the :lastpage marker, so the next read that reaches the end
+	// of the feed asks the database once more — GetPostFeed would call SeedPostFeed here,
+	// which is why this test checks the state directly instead.
+	end, errEnd := store.PostFeed.ReachedEnd(ctx, "u1")
+	if errEnd != nil {
+		t.Fatalf("ReachedEnd: %v", errEnd)
 	}
-	if !needsSeed {
-		t.Fatal("a feed that lost an item did not ask to be reseeded")
+	if end {
+		t.Fatal("a feed that lost an item still claims to hold the end of the table")
 	}
 }

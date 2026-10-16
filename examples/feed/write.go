@@ -77,10 +77,10 @@ func (s *Store) RenameOrganisation(ctx context.Context, randId, name string) err
 // explicit: RemoveItem only detaches the post from that one feed, because it may well
 // be a member of others.
 //
-// RemoveItem also clears that feed's first-page and last-page markers. It has to:
-// "nothing exists before this page" stopped being true the moment an item left. So the
-// next read of an affected feed reports RequiresSeeding and rebuilds from the
-// database. Budget for that when deleting something with a wide fan-out.
+// RemoveItem also clears that feed's :lastpage marker, so the next read that reaches the
+// end of an affected feed tops it up from the database once — it finds nothing new and
+// marks the end again. Budget one query per affected feed when deleting something with
+// a wide fan-out.
 func (s *Store) DeletePost(ctx context.Context, post *Post, feedUserRandIds []string) error {
 	pipe := s.redis.Pipeline()
 

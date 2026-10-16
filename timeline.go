@@ -414,6 +414,50 @@ func (cr *Timeline[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyP
 	return cr.setMarker(ctx, pipe, markerBlankPage, keyParams)
 }
 
+// ReachedEnd reports whether the index already holds the end of the data, so that a
+// page running past its last member needs no top-up: the collection was confirmed empty
+// (MarkEmpty), or it holds members and a seed found nothing after them (MarkLastPage).
+// One round trip.
+//
+// A :lastpage marker on an index that holds nothing is ignored. It is left over from
+// the index's previous life — markers set by a later top-up outlive an index whose TTL
+// was set by its head seed — and trusting it would end the feed at whatever the next
+// head seed loads.
+func (cr *Timeline[T]) ReachedEnd(ctx context.Context, keyParams ...string) (bool, error) {
+	key, err := cr.sortedSetClient.key(keyParams)
+	if err != nil {
+		return false, err
+	}
+
+	// The markers hang off the hash-tagged collection key, so all three reads land on
+	// one node even on a cluster.
+	pipe := cr.client.Pipeline()
+	count := pipe.ZCard(ctx, key)
+	lastPage := pipe.Get(ctx, key+markerLastPage)
+	blankPage := pipe.Get(ctx, key+markerBlankPage)
+	if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
+		return false, errPipe
+	}
+
+	members, errCount := count.Result()
+	if errCount != nil {
+		return false, errCount
+	}
+
+	isSet := func(marker *redis.StringCmd) (bool, error) {
+		value, errMarker := marker.Result()
+		if errors.Is(errMarker, redis.Nil) {
+			return false, nil
+		}
+		return value == "1", errMarker
+	}
+
+	if members == 0 {
+		return isSet(blankPage)
+	}
+	return isSet(lastPage)
+}
+
 func (cr *Timeline[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
 	return cr.clearMarker(ctx, pipe, markerBlankPage, keyParams)
 }
@@ -664,6 +708,14 @@ func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {
 	}
 }
 
+// RequiresSeeding is the seeding check of the original Timeline flow, kept for existing
+// callers. It cannot drive a feed: the handler it was documented with seeded the first
+// page only, so "load more" stopped after page one, and it reports a warm index without
+// markers as needing a seed on every first-page read.
+//
+// Deprecated: use the top-up flow — FetchFrom, then, while the page has no HasMore and
+// the index has not ReachedEnd, seed from Tail and read again. CLAUDE.consumer.md has
+// the handler.
 func (b *Timeline[T]) RequiresSeeding(ctx context.Context, totalItems int64, keyParams ...string) (bool, error) {
 	count, errCount := b.sortedSetClient.Count(ctx, keyParams...)
 	if errCount != nil {

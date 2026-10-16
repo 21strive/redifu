@@ -219,10 +219,18 @@ Timeline stores pagination state via additional Redis keys:
 | Key suffix   | Value | Meaning |
 |--------------|-------|---------|
 | `:blankpage` | `"1"` | Sorted set confirmed empty from DB |
-| `:firstpage` | `"1"` | No items exist before this page |
-| `:lastpage`  | `"1"` | No items exist after this page |
+| `:lastpage`  | `"1"` | The index reaches the end of the data: a seed got fewer rows than it asked for |
+| `:firstpage` | `"1"` | Legacy: the original first-page seed returned less than a page. The documented flow no longer sets it |
 
 These markers are set by seeders. Do not set them manually outside of a seeder.
+
+A Timeline index is always a **prefix** of the data in the timeline's order: the head seed
+loads it from the top and every later seed extends it from `Tail`. That is what the markers
+and the ingest window rely on, and why a top-up must never be anchored on a client's cursor.
+`ReachedEnd` reads `:blankpage` for an empty index and `:lastpage` for one that holds
+members — a `:lastpage` left on an empty index outlived the index it described (the head seed
+sets the index TTL, a later top-up the marker's) and is ignored; the documented head seed
+also drops it.
 
 ## Ingest runs inside Redis
 
@@ -296,8 +304,9 @@ saved. Consumer-facing guidance and a worked example live in `CLAUDE.consumer.md
 | `Base.GetMany(ctx, randIds)` | read many items in one round-trip, relations resolved |
 | `IngestItem(ctx, pipe, item, seed, keyParams...)` | add to the index — pass `seed = true` while seeding |
 | `SetExpiration(ctx, pipe, keyParams...)` | apply the collection TTL |
-| `RequiresSeeding(...)` | decide whether seeding is needed at all |
-| `MarkEmpty` / `MarkFirstPage` / `MarkLastPage` | Timeline state markers (see above) |
+| `RequiresSeeding(...)` | decide whether seeding is needed at all (`Sorted`, `Page`; deprecated on `Timeline`) |
+| `MarkEmpty` / `MarkLastPage` / `UnmarkLastPage` | Timeline state markers (see above) |
+| `Timeline.ReachedEnd` / `Timeline.Tail` | whether a page that ran past the index needs a top-up, and where it continues from |
 | `TimeSeries.Covers(ctx, instant, ...)` | does a seeded segment cover this instant |
 | `Page.AddPage` | register a page in the page index |
 | `TimeSeries.AddSegment` / `FindGap` | record and locate seeded time ranges |
@@ -305,8 +314,14 @@ saved. Consumer-facing guidance and a worked example live in `CLAUDE.consumer.md
 These are the only supported entry points for writing into a collection out of band. All of
 them take a caller-owned pipeline and must not execute it — see Pipeline Discipline.
 
-`subtraction` is a Timeline concept the consumer computes and applies themselves: the gap
-between what Redis already holds and `itemPerPage`, subtracted from the SQL `LIMIT`.
+A Timeline is seeded by **top-up**: `FetchFrom(cursor)`; while the page has no `HasMore()`
+and the index has not `ReachedEnd`, seed `itemPerPage + 1 - len(items)` rows that follow
+`Tail` and fetch again. The head seed of a cold index is the same call with the zero
+`Cursor` as anchor. The consumer's keyset must compare exactly what the index sorts by — the
+score (`Timeline.Score`; milliseconds for a time field) and the member in byte order — and
+`TestDocumentedTimelineFlow*` (`topup_flow_test.go`) drives the documented handler and
+seeder against tables of 0 to 200 rows. It replaces the `subtraction` parameter of the
+original flow, whose handler seeded the first page only.
 
 ---
 
