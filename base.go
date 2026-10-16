@@ -2,7 +2,6 @@ package redifu
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -137,8 +136,8 @@ func (cr *Base[T]) Get(ctx context.Context, keyParams ...string) (T, error) {
 		return nilItem, result.Err()
 	}
 
-	var fetchedItem T
-	if errUnmarshal := json.Unmarshal([]byte(result.Val()), &fetchedItem); errUnmarshal != nil {
+	fetchedItem, errUnmarshal := decodeItem[T]([]byte(result.Val()))
+	if errUnmarshal != nil {
 		return nilItem, errUnmarshal
 	}
 
@@ -230,8 +229,8 @@ func (cr *Base[T]) stageGetMany(ctx context.Context, pipe redis.Pipeliner, randI
 				return nil, err
 			}
 
-			var fetchedItem T
-			if errUnmarshal := json.Unmarshal([]byte(value), &fetchedItem); errUnmarshal != nil {
+			fetchedItem, errUnmarshal := decodeItem[T]([]byte(value))
+			if errUnmarshal != nil {
 				return nil, errUnmarshal
 			}
 
@@ -261,7 +260,7 @@ func (cr *Base[T]) set(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 		return errKey
 	}
 
-	itemInByte, errorMarshalJson := json.Marshal(item)
+	itemInByte, errorMarshalJson := encodeItem(item)
 	if errorMarshalJson != nil {
 		return errorMarshalJson
 	}
@@ -296,7 +295,7 @@ func (cr *Base[T]) setIfAbsent(ctx context.Context, pipe redis.Pipeliner, item T
 		return errKey
 	}
 
-	itemInByte, errorMarshalJson := json.Marshal(item)
+	itemInByte, errorMarshalJson := encodeItem(item)
 	if errorMarshalJson != nil {
 		return errorMarshalJson
 	}
