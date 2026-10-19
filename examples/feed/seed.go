@@ -77,23 +77,16 @@ func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, after redif
 	}
 	defer rows.Close()
 
-	pipe := s.redis.Pipeline()
-
-	if after.IsZero() {
-		// A head seed starts the index over. A :lastpage marker can outlive the index it
-		// described — the index TTL is set here, the marker's by a later top-up — and left
-		// in place it would end the feed at this head.
-		if err := s.PostFeed.UnmarkLastPage(ctx, pipe, userRandId); err != nil {
-			return err
-		}
-	}
+	// One MULTI/EXEC: Redis applies the seed whole, so a reader never sees half of it (and, once
+	// the feed has a generation, no other generation's seed interleaves with it).
+	pipe := s.redis.TxPipeline()
 
 	// The same author appears on many rows. Deduplicating is not needed for
 	// correctness — same key, same value — but it keeps the pipeline small.
 	seenAccount := map[string]bool{}
 	seenOrganisation := map[string]bool{}
 
-	var count int64
+	var posts []*Post
 
 	for rows.Next() {
 		post, account, organisation, errScan := scanFeedRow(rows)
@@ -105,10 +98,7 @@ func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, after redif
 		if err := s.PostBase.WithPipeline(pipe).Set(ctx, post); err != nil {
 			return err
 		}
-		if err := s.PostFeed.IngestItem(ctx, pipe, post, true, userRandId); err != nil {
-			return err
-		}
-		count++
+		posts = append(posts, post)
 
 		// The joined entities are NOT fully selected — this query never asked for
 		// a.bio or o.plan. SetIfAbsent warms a cold key and refreshes a warm one's
@@ -131,10 +121,35 @@ func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, after redif
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	count := int64(len(posts))
+
+	if !after.IsZero() {
+		// A top-up. Extend appends the rows only while the index still ends at `after` —
+		// if it was purged or seeded again from its head since Tail was read, it writes
+		// nothing and the handler reads again — and marks the end of the table when the
+		// rows ran out. It renews the index TTL with that marker.
+		if _, err := s.PostFeed.Extend(ctx, pipe, after, posts, count < limit, userRandId); err != nil {
+			return err
+		}
+		_, err = pipe.Exec(ctx)
+		return err
+	}
+
+	// A head seed starts the index over. A :lastpage marker can outlive the index it
+	// described (an evicted index leaves it), and left in place it would end the feed at
+	// this head.
+	if err := s.PostFeed.UnmarkLastPage(ctx, pipe, userRandId); err != nil {
+		return err
+	}
+	for _, post := range posts {
+		if err := s.PostFeed.IngestItem(ctx, pipe, post, true, userRandId); err != nil {
+			return err
+		}
+	}
 
 	// State markers, so the next request knows whether there is more to load.
 	switch {
-	case after.IsZero() && count == 0:
+	case count == 0:
 		// Nothing in the table for this feed.
 		if err := s.PostFeed.MarkEmpty(ctx, pipe, userRandId); err != nil {
 			return err
@@ -146,10 +161,8 @@ func (s *Store) SeedPostFeed(ctx context.Context, userRandId string, after redif
 		}
 	}
 
-	if after.IsZero() {
-		if err := s.PostFeed.SetExpiration(ctx, pipe, userRandId); err != nil {
-			return err
-		}
+	if err := s.PostFeed.SetExpiration(ctx, pipe, userRandId); err != nil {
+		return err
 	}
 
 	// One round-trip for the whole page. Nothing above executed the pipeline —
