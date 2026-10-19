@@ -115,6 +115,7 @@ type feedStore struct {
 	table    *feedTable
 	user     string
 	pageSize int64 // WithLimit for every read; 0 keeps itemPerPage
+	tx       bool  // seed in one MULTI/EXEC, as a timeline with a generation must
 }
 
 // perPage is the page size of the store's reads.
@@ -131,6 +132,9 @@ func (s *feedStore) seed(ctx context.Context, after Cursor, limit int64) error {
 	rows := s.table.after(s.t, s.timeline, after, limit)
 
 	pipe := s.client.Pipeline()
+	if s.tx {
+		pipe = s.client.TxPipeline()
+	}
 	if after.IsZero() {
 		// A head seed starts the index over: a :lastpage marker can outlive the index
 		// it described.
