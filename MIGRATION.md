@@ -443,6 +443,34 @@ An addition. `timelineFetchBuilder.WithLimit(n int64)` reads a page of `n` for t
 `per_page` of 20 and of 100 — no Timeline per page size. Size the top-up of such a read from
 `n` (`n + 1 - len(items)`), and bound `n` yourself when a client chooses it.
 
+## 24. Generations instead of versioned key names
+
+An addition; nothing changes until you call it. `SetGeneration(generation string) error` on
+`Base`, `Sorted`, `Timeline`, `Page` and `TimeSeries` (and `Generation()` to read it back):
+
+- A `Base` writes every value as `<generation>\x1f<encoded item>` and reads only values with
+  that prefix; any other value is a missing key (`ErrNotFound`, absent from `GetMany`, dangling
+  in an index). `SetIfAbsent` replaces such a value, `Exists` reports false.
+- An index is stamped with a `{K}:gen` marker, with the index TTL. An index whose marker is
+  absent or another generation's is dropped — sorted set and every marker — by the first
+  operation that finds it, in the same command: reads see a cold index, `AddItem` and
+  `RemoveItem` return `ErrNotIngested`, a seed starts empty and stamps it. Run seeds in one
+  `MULTI/EXEC`.
+- A `TimeSeries` also keeps a `gen` field in its segment store; segments of another generation
+  read as gaps.
+
+To drop a version segment from your key formats: set a generation on every `Base` and index,
+remove the segment from the formats, and delete the old keys once the new build serves alone
+(they also expire on their own). Values written without a generation read as missing for a Base
+that has one, so nothing the old build wrote is ever read.
+
+`Purge` now also deletes the `{K}:gen` marker. Without a generation there is none, so this
+changes nothing.
+
+`Timeline.RemoveItem` and `Sorted.RemoveItem` (and `Page.RemoveItem`) may now return
+`ErrNotIngested` — only with a generation, when the index was another generation's and was
+dropped instead.
+
 ---
 
 ## Checklist
@@ -460,3 +488,5 @@ An addition. `timelineFetchBuilder.WithLimit(n int64)` reads a page of `n` for t
 8. Handle `ErrResetPagination` on the output of `Fetch(lastRandIds)` — or move the client to
    position cursors (`FetchFrom`, `NextCursor`), which never send it back to page one.
 9. If you run Redis below 6.2, call `SetTouchOnRead(false)` on every `Base`.
+10. Optional: give every `Base` and index a generation (section 24) instead of versioning key
+    names, and seed through `TxPipeline` once you do.

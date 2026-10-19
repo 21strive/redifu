@@ -359,6 +359,20 @@ pattern for `Sorted`, `Page` and `TimeSeries` and for clients that still send ra
 
 TTL is configurable at initialization.
 
+## Generations
+
+A cache whose contents change shape between builds keeps its key names and sets a generation
+instead of versioning them (`post:%s`, never `post:v3:%s`):
+
+```go
+postBase.SetGeneration(shapeOfPost)    // values of another shape read as missing
+timeline.SetGeneration(buildCommit)    // an index seeded by another build is dropped and reseeded
+```
+
+Two builds of different generations can share one Redis during a rolling deploy without
+reading each other's values or indexes. Seed an index with a generation in one `MULTI/EXEC`
+(`TxPipeline`). Details: `CLAUDE.consumer.md` ("Generations") and `MIGRATION.md` §24.
+
 ## Limitations
 
 - Sorting only supports fields of type `time.Time`, `*time.Time` or `int64`. An `int64` beyond
