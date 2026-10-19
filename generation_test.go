@@ -354,10 +354,11 @@ func scenarioSortedGenerationPingPongSeed(t *testing.T, newClient clientFactory)
 		t.Fatalf("b reads %v, want only p3", got)
 	}
 
-	// And back: a's fetch reads nothing of b's, a needs seeding again.
+	// And back: a's fetch reads nothing of b's — it answers ErrNotSeeded, never an empty list —
+	// and a needs seeding again.
 	items, err = a.sorted.Fetch(Descending).WithParams("o1").Exec(ctx)
-	if err != nil {
-		t.Fatalf("a Fetch: %v", err)
+	if !errors.Is(err, ErrNotSeeded) {
+		t.Fatalf("a Fetch of b's index = %v, %v; want ErrNotSeeded", postIds(items), err)
 	}
 	if len(items) != 0 {
 		t.Fatalf("a read b's index: %v", postIds(items))
@@ -771,8 +772,8 @@ func scenarioPageGeneration(t *testing.T, newClient clientFactory) {
 	if needs, err := a.RequiresSeeding(ctx, 1, "o1"); err != nil || needs {
 		t.Fatalf("a RequiresSeeding = %v, %v", needs, err)
 	}
-	if items, err := b.Fetch(1).WithParams("o1").Exec(ctx); err != nil || len(items) != 0 {
-		t.Fatalf("b read a's page: %v, %v", items, err)
+	if items, err := b.Fetch(1).WithParams("o1").Exec(ctx); !errors.Is(err, ErrNotSeeded) || len(items) != 0 {
+		t.Fatalf("b read a's page: %v, %v; want ErrNotSeeded", items, err)
 	}
 	if needs, err := b.RequiresSeeding(ctx, 1, "o1"); err != nil || !needs {
 		t.Fatalf("b RequiresSeeding = %v, %v", needs, err)

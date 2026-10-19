@@ -138,9 +138,9 @@ func (srtd *Sorted[T]) SetSelfHeal(selfHeal bool) {
 // generation, or none, is treated as not there. Every operation that finds one drops the sorted
 // set and its markers before it does its own work, in the same command, so:
 //
-//   - RequiresSeeding reports true, IsEmpty false, Count 0, and a fetch returns nothing;
-//   - AddItem and RemoveItem report ErrNotIngested (the dropped index is seeded again on the
-//     next read, this change included);
+//   - RequiresSeeding reports true, IsEmpty false, Count 0, and a fetch answers ErrNotSeeded;
+//   - AddItem reports ErrNotIngested, and so does RemoveItem when there was an index to drop
+//     (the dropped index is seeded again on the next read, this change included);
 //   - a seed — IngestItem with seed = true, MarkEmpty, HasData, SetExpiration — starts from an
 //     empty index and stamps the marker, with the index TTL.
 //
@@ -148,27 +148,24 @@ func (srtd *Sorted[T]) SetSelfHeal(selfHeal bool) {
 // have changed — a build's commit is the safe choice — so that two builds sharing one Redis never
 // serve each other's index: each one reseeds what the other seeded, and a write by either one
 // removes the other's index rather than leaving it stale. "" turns it off again. The generation
-// must be at most 128 bytes without control characters. Set it before the index is used.
+// must be at most 128 bytes without control characters. It may be changed while the index is in
+// use: every operation takes the generation current when it starts.
 //
 // Run each seed in one MULTI/EXEC (a TxPipeline): its first write drops another generation's
 // index, so a seed whose writes were interleaved with another generation's could otherwise end
 // up holding members of both.
 func (srtd *Sorted[T]) SetGeneration(generation string) error {
-	if err := validateGeneration(generation); err != nil {
-		return err
-	}
-	srtd.sortedSetClient.generation = generation
-	return nil
+	return srtd.sortedSetClient.gen.set(generation)
 }
 
 // Generation is the index generation SetGeneration set, "" for none.
 func (srtd *Sorted[T]) Generation() string {
-	return srtd.sortedSetClient.generation
+	return srtd.sortedSetClient.generation()
 }
 
 func (srtd *Sorted[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
-	if srtd.sortedSetClient.generation != "" {
-		return srtd.sortedSetClient.stamp(ctx, pipe, srtd.timeToLive, "expire", nil, nil, keyParams)
+	if generation := srtd.sortedSetClient.generation(); generation != "" {
+		return srtd.sortedSetClient.stamp(ctx, pipe, generation, srtd.timeToLive, "expire", nil, nil, keyParams)
 	}
 	return srtd.sortedSetClient.SetExpiration(ctx, pipe, srtd.timeToLive, keyParams...)
 }
@@ -255,11 +252,11 @@ func (srtd *Sorted[T]) ingest(ctx context.Context, pipe redis.Pipeliner, item T,
 		return nil, err
 	}
 
-	generation := srtd.sortedSetClient.generation
+	generation := srtd.sortedSetClient.generation()
 
 	if seed {
 		if generation != "" {
-			if errStamp := srtd.sortedSetClient.stamp(ctx, pipe, srtd.timeToLive, "zadd", formatScore(score), item.GetRandId(), keyParams); errStamp != nil {
+			if errStamp := srtd.sortedSetClient.stamp(ctx, pipe, generation, srtd.timeToLive, "zadd", formatScore(score), item.GetRandId(), keyParams); errStamp != nil {
 				return nil, errStamp
 			}
 			return nil, nil
@@ -300,8 +297,8 @@ func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 	// Only the index is touched. The item stays in Base, because it may well be a member
 	// of other collections; deleting the entity itself is Base.Del's job.
 	var removed *redis.Cmd
-	if srtd.sortedSetClient.generation != "" {
-		cmd, err := srtd.sortedSetClient.removeMembers(ctx, pipe, false, []interface{}{item.GetRandId()}, keyParams)
+	if generation := srtd.sortedSetClient.generation(); generation != "" {
+		cmd, err := srtd.sortedSetClient.removeMembers(ctx, pipe, generation, false, []interface{}{item.GetRandId()}, keyParams)
 		if err != nil {
 			return err
 		}
@@ -315,12 +312,9 @@ func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 			return errPipe
 		}
 		if removed != nil {
-			// The index was another generation's and has been dropped rather than changed.
-			if own, err := removed.Int64(); err != nil {
-				return err
-			} else if own == 0 {
-				return ErrNotIngested
-			}
+			// ErrNotIngested: the index was another generation's and has been dropped rather
+			// than changed.
+			return removalOutcome(removed)
 		}
 	}
 
@@ -329,7 +323,7 @@ func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 // RemoveItem drops the item from the index. The item itself stays in Base. With a generation,
 // an index of another generation is dropped whole instead, and RemoveItem reports
-// ErrNotIngested.
+// ErrNotIngested; an index that is not there at all is no error, as without a generation.
 func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
 	return srtd.removeItem(ctx, nil, item, keyParams...)
 }
@@ -342,8 +336,8 @@ func (srtd *Sorted[T]) Fetch(direction string) *sortedFetchBuilder[T] {
 }
 
 func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
-	if srtd.sortedSetClient.generation != "" {
-		return srtd.sortedSetClient.stampMarker(ctx, pipe, srtd.timeToLive, markerBlankPage, true, keyParams)
+	if generation := srtd.sortedSetClient.generation(); generation != "" {
+		return srtd.sortedSetClient.stampMarker(ctx, pipe, generation, srtd.timeToLive, markerBlankPage, true, keyParams)
 	}
 
 	key, err := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
@@ -356,8 +350,8 @@ func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyP
 }
 
 func (srtd *Sorted[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
-	if srtd.sortedSetClient.generation != "" {
-		return srtd.sortedSetClient.stampMarker(ctx, pipe, srtd.timeToLive, markerBlankPage, false, keyParams)
+	if generation := srtd.sortedSetClient.generation(); generation != "" {
+		return srtd.sortedSetClient.stampMarker(ctx, pipe, generation, srtd.timeToLive, markerBlankPage, false, keyParams)
 	}
 
 	key, err := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
@@ -375,8 +369,8 @@ func (srtd *Sorted[T]) IsEmpty(ctx context.Context, keyParams ...string) (bool, 
 		return false, errKey
 	}
 
-	if srtd.sortedSetClient.generation != "" {
-		return srtd.sortedSetClient.guardedMarker(ctx, key, keyParams)
+	if generation := srtd.sortedSetClient.generation(); generation != "" {
+		return srtd.sortedSetClient.guardedMarker(ctx, generation, key, keyParams)
 	}
 
 	return markerIsSet(ctx, srtd.client, key)
@@ -394,7 +388,7 @@ func markerIsSet(ctx context.Context, client redis.UniversalClient, key string) 
 }
 
 func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string) (bool, error) {
-	if srtd.sortedSetClient.generation != "" {
+	if generation := srtd.sortedSetClient.generation(); generation != "" {
 		// One MULTI/EXEC: an index of another generation is dropped by the check, and the
 		// marker and the count read after it then say it needs seeding.
 		key, err := srtd.sortedSetClient.key(keyParams)
@@ -403,7 +397,7 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 		}
 		var blank *redis.StringCmd
 		var count *redis.IntCmd
-		if _, err := srtd.sortedSetClient.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+		if _, err := srtd.sortedSetClient.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
 			blank = pipe.Get(ctx, key+markerBlankPage)
 			count = pipe.ZCard(ctx, key)
 			return nil
@@ -546,7 +540,8 @@ func (s *sortedFetchBuilder[T]) members(ctx context.Context) ([]string, error) {
 
 // Exec returns the items the fetch covers. Members whose item has expired out of Base
 // are left out — and removed from the index, unless self-healing is off — so the result
-// can be shorter than the range. Use ExecReport to learn whether it is.
+// can be shorter than the range. Use ExecReport to learn whether it is. With a generation, an
+// index that is not this generation's answers ErrNotSeeded: seed it and read again.
 func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 	items, _, err := s.ExecReport(ctx)
 	return items, err
@@ -557,7 +552,9 @@ func (s *sortedFetchBuilder[T]) Exec(ctx context.Context) ([]T, error) {
 // "this list is complete" looked the same. A non-zero count means the collection is
 // missing items the database may still hold — their keys expired before the index did —
 // so a consumer that needs the whole list (a full collection, a month of bookings)
-// reseeds it. Self-healing removes those members either way, as Exec does.
+// reseeds it. Self-healing removes those members either way, as Exec does — except, with
+// generations, a member whose item holds another generation's value: it counts as dangling and
+// stays, because the item exists (a reseed writes it in this generation).
 func (s *sortedFetchBuilder[T]) ExecReport(ctx context.Context) ([]T, int, error) {
 	members, err := s.members(ctx)
 	if err != nil {

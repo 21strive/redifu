@@ -16,13 +16,13 @@ type SortedSet[T Blueprint] struct {
 	// index decays into a set of dangling randIds that quietly shortens every page.
 	selfHeal bool
 	// markers are the suffixes of the collection's state markers, in the order the
-	// generation scripts take them: :blankpage for a Sorted; :firstpage, :lastpage and
-	// :blankpage for a Timeline.
+	// generation scripts take them: :blankpage for a Sorted; :blankpage and :segments (the
+	// segment store) for a TimeSeries; :firstpage, :lastpage and :blankpage for a Timeline.
 	markers []string
-	// generation is the index generation its owner set (Sorted.SetGeneration,
-	// Timeline.SetGeneration), "" for none. The reads below check it; the writes are made
+	// gen is the index generation its owner set (Sorted.SetGeneration,
+	// Timeline.SetGeneration), none by default. The reads below check it; the writes are made
 	// by the owner, which knows the TTL a stamp needs.
-	generation string
+	gen generationCell
 }
 
 func NewSortedSet[T Blueprint](client redis.UniversalClient, sortedSetKeyFormat string) (*SortedSet[T], error) {
@@ -106,9 +106,9 @@ func (cr *SortedSet[T]) Count(ctx context.Context, keyParams ...string) (int64, 
 		return 0, err
 	}
 
-	if cr.generation != "" {
+	if generation := cr.generation(); generation != "" {
 		var count *redis.IntCmd
-		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+		if _, err := cr.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
 			count = pipe.ZCard(ctx, key)
 			return nil
 		}); err != nil {
@@ -151,9 +151,9 @@ func (cr *SortedSet[T]) edgeScore(ctx context.Context, lowest bool, keyParams []
 
 	var result []redis.Z
 	var err error
-	if cr.generation != "" {
+	if generation := cr.generation(); generation != "" {
 		var edge *redis.ZSliceCmd
-		if _, err = cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+		if _, err = cr.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
 			edge = pipe.ZRangeWithScores(ctx, key, start, stop)
 			return nil
 		}); err == nil {
@@ -174,7 +174,8 @@ func (cr *SortedSet[T]) edgeScore(ctx context.Context, lowest bool, keyParams []
 
 // rangeMembers reads the randIds the index holds for this range. It is deliberately
 // separate from hydration so that Timeline's cursor script, which produces members by
-// a different route, shares the same item-loading path.
+// a different route, shares the same item-loading path. With a generation, an index that is
+// not this generation's answers ErrNotSeeded (the check has just dropped it).
 func (cr *SortedSet[T]) rangeMembers(
 	ctx context.Context,
 	direction string,
@@ -209,15 +210,8 @@ func (cr *SortedSet[T]) rangeMembers(
 		return cmd.ZRange(ctx, key, start, stop)
 	}
 
-	if cr.generation != "" {
-		var result *redis.StringSliceCmd
-		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
-			result = read(pipe)
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-		return result.Result()
+	if generation := cr.generation(); generation != "" {
+		return cr.guardedMembers(ctx, generation, keyParams, read)
 	}
 
 	result := read(cr.client)
@@ -226,6 +220,23 @@ func (cr *SortedSet[T]) rangeMembers(
 	}
 
 	return result.Val(), nil
+}
+
+// guardedMembers runs one member read behind the generation check, answering ErrNotSeeded for an
+// index that was not this generation's.
+func (cr *SortedSet[T]) guardedMembers(ctx context.Context, generation string, keyParams []string, read func(cmd redis.Cmdable) *redis.StringSliceCmd) ([]string, error) {
+	var result *redis.StringSliceCmd
+	own, err := cr.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
+		result = read(pipe)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !own {
+		return nil, ErrNotSeeded
+	}
+	return result.Result()
 }
 
 // scoreRangeMembers reads the members of a score range with a LIMIT: ZRANGEBYSCORE, or
@@ -265,15 +276,8 @@ func (cr *SortedSet[T]) scoreRangeMembers(
 		return cmd.ZRangeByScore(ctx, key, &bounds)
 	}
 
-	if cr.generation != "" {
-		var result *redis.StringSliceCmd
-		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
-			result = read(pipe)
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-		return result.Result()
+	if generation := cr.generation(); generation != "" {
+		return cr.guardedMembers(ctx, generation, keyParams, read)
 	}
 
 	result := read(cr.client)
@@ -286,7 +290,9 @@ func (cr *SortedSet[T]) scoreRangeMembers(
 
 // rangeWithScores reads members by rank together with the score the index holds for
 // each. Timeline needs the score of a page's last member to hand back a Cursor, and it
-// has to be the stored score, not one recomputed from an item that may have changed.
+// has to be the stored score, not one recomputed from an item that may have changed. With a
+// generation, an index that is not this generation's reads as a cold one (nothing): a Timeline
+// read of it seeds.
 func (cr *SortedSet[T]) rangeWithScores(
 	ctx context.Context,
 	direction string,
@@ -311,8 +317,8 @@ func (cr *SortedSet[T]) rangeWithScores(
 	}
 
 	var result *redis.ZSliceCmd
-	if cr.generation != "" {
-		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+	if generation := cr.generation(); generation != "" {
+		if _, err := cr.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
 			result = read(pipe)
 			return nil
 		}); err != nil {
@@ -347,6 +353,11 @@ func (cr *SortedSet[T]) rangeWithScores(
 // collection converges instead of decaying, and the count is reported to the caller,
 // so Timeline can tell "this is the end of the feed" apart from "three items in the
 // middle of this page have expired".
+//
+// With generations, a member whose item holds a value of another generation counts as dangling
+// too — this read cannot serve it — but is not removed: the item exists, and the index is right
+// to hold it. A consumer that needs the whole list reseeds it (its seed writes this generation's
+// values); removing the member would leave a hole that no later read refills.
 func (cr *SortedSet[T]) hydrate(
 	ctx context.Context,
 	baseClient *Base[T],
@@ -361,43 +372,49 @@ func (cr *SortedSet[T]) hydrate(
 		return nil, 0, nil
 	}
 
-	fetchedItems, errGetMany := baseClient.getManyRaw(ctx, members)
+	fetchedItems, foreign, errGetMany := baseClient.getManyReport(ctx, members)
 	if errGetMany != nil {
 		return nil, 0, errGetMany
 	}
 
 	items := make([]T, 0, len(members))
-	dangling := make([]interface{}, 0)
+	dangling := 0
+	gone := make([]interface{}, 0)
 
 	for _, randId := range members {
 		fetchedItem, found := fetchedItems[randId]
 		if !found {
-			dangling = append(dangling, randId)
+			dangling++
+			if !foreign[randId] {
+				gone = append(gone, randId)
+			}
 			continue
 		}
 		items = append(items, fetchedItem)
 	}
 
-	if len(dangling) > 0 && cr.selfHeal {
+	if len(gone) > 0 && cr.selfHeal {
 		// Best effort. The read succeeded; failing it because the cleanup did not
 		// would trade a working page for a housekeeping error. With a generation the
-		// removal is guarded: the index may have become another generation's since it
-		// was read, and that one's members are not this read's to remove.
-		if cr.generation != "" {
-			if cmd, err := cr.removeMembers(ctx, cr.client, false, dangling, keyParams); err == nil {
-				_ = cmd.Err()
+		// removal applies only to an index that is still this generation's: one that has
+		// become another generation's since it was read is not this read's to change.
+		if generation := cr.generation(); generation != "" {
+			if keys, err := cr.generationKeys(keyParams); err == nil {
+				args := make([]interface{}, 0, len(gone)+1)
+				args = append(args, gone...)
+				_ = generationHealScript.Eval(ctx, cr.client, keys, append(args, generation)...).Err()
 			}
 		} else if key, err := cr.key(keyParams); err == nil {
-			cr.client.ZRem(ctx, key, dangling...)
+			cr.client.ZRem(ctx, key, gone...)
 		}
 	}
 
 	if len(items) == 0 {
-		return nil, len(dangling), nil
+		return nil, dangling, nil
 	}
 
 	if errRelation := resolveRelations(ctx, cr.client, relations, items, relationDepth); errRelation != nil {
-		return nil, len(dangling), errRelation
+		return nil, dangling, errRelation
 	}
 
 	if processor != nil {
@@ -406,7 +423,7 @@ func (cr *SortedSet[T]) hydrate(
 		}
 	}
 
-	return items, len(dangling), nil
+	return items, dangling, nil
 }
 
 // Fetch reads a range of the index and returns the hydrated items.

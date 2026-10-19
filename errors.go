@@ -33,6 +33,13 @@ var (
 	// exactly by a float64 sorted-set score, which would corrupt ordering silently.
 	ErrScoreOutOfRange = errors.New("redifu: sorting reference exceeds the exact integer range of a sorted-set score")
 
+	// ErrNotSeeded is returned by a Sorted or Page read (Exec, ExecReport) with a generation set
+	// when the index was not this generation's — another generation seeded it, its marker expired
+	// or it was never seeded — and the read's check has just dropped it. It holds nothing for this
+	// generation: seed it and read again. An empty list is never answered for an index in that
+	// state, because it would read as a list confirmed empty.
+	ErrNotSeeded = errors.New("redifu: index not seeded for this generation")
+
 	// ErrInvalidCursor is returned by ParseCursor for a token Cursor.String did not
 	// produce, and by FetchFrom for a cursor whose score is not a number. A consumer
 	// can answer it with a client error.

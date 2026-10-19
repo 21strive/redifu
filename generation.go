@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -25,13 +26,16 @@ import (
 //   - SetGeneration on Sorted, Timeline, Page and TimeSeries stamps the index with a marker,
 //     {K}:gen, next to its other markers. An index whose marker is absent or names another
 //     generation does not exist for this one: the operation that finds it drops the sorted set and
-//     all its markers first, atomically with its own work, so a read finds a cold index, AddItem
-//     and RemoveItem report ErrNotIngested (the index is gone, the next read seeds it), and a seed
-//     starts from an empty index and stamps it.
+//     all its markers first, atomically with its own work, so a read finds a cold index (a Sorted
+//     or Page read answers ErrNotSeeded), AddItem and RemoveItem report ErrNotIngested (the index
+//     is gone, the next read seeds it), and a seed starts from an empty index and stamps it.
 //
 // Two builds of different generations can therefore share one Redis: each sees only its own values
 // and indexes, and a write by either one removes the other's index instead of leaving it stale.
 // Without SetGeneration nothing changes: values carry no prefix and no marker is read or written.
+//
+// SetGeneration may be called again while the collection is in use — a consumer that moves to a new
+// generation at run time — and each command takes the generation current when it is issued.
 
 // markerGeneration is the suffix of an index's generation marker.
 const markerGeneration = ":gen"
@@ -67,10 +71,45 @@ func generationPrefix(generation string) string {
 	return generation + generationSeparator
 }
 
+// generationValue is one generation and the value prefix it gives a Base.
+type generationValue struct {
+	generation string // "" for none
+	prefix     string // generation + separator, "" for none
+}
+
+var noGeneration = &generationValue{}
+
+// generationCell holds a collection's generation. SetGeneration may change it while other
+// goroutines use the collection, so it is read atomically, and an operation reads it once: every
+// command it issues carries the same generation.
+type generationCell struct {
+	value atomic.Pointer[generationValue]
+}
+
+func (c *generationCell) load() *generationValue {
+	if value := c.value.Load(); value != nil {
+		return value
+	}
+	return noGeneration
+}
+
+func (c *generationCell) set(generation string) error {
+	if err := validateGeneration(generation); err != nil {
+		return err
+	}
+	c.value.Store(&generationValue{generation: generation, prefix: generationPrefix(generation)})
+	return nil
+}
+
 // ownValue returns the payload of a stored value when it carries prefix, and false for a value of
-// another generation (or none).
+// another generation (or none). Without a prefix a value holding the separator is another
+// generation's too: JSON never holds it raw, so it can only be a generation's prefix, and reading
+// it as a document would fail the whole read instead of missing one item.
 func ownValue(value string, prefix string) (string, bool) {
 	if prefix == "" {
+		if strings.Contains(value, generationSeparator) {
+			return "", false
+		}
 		return value, true
 	}
 	if !strings.HasPrefix(value, prefix) {
@@ -95,6 +134,20 @@ end
 `
 }
 
+// removalGuard opens a removal script. It is generationGuard, except that a collection which is not
+// there at all — no generation marker and none of its other keys — returns -1: there was nothing
+// to remove, as for a collection without a generation, rather than another generation's index.
+const removalGuard = `
+local held = redis.call('GET', KEYS[#KEYS])
+if held ~= ARGV[#ARGV] then
+  if not held and redis.call('EXISTS', unpack(KEYS, 1, #KEYS - 1)) == 0 then
+    return -1
+  end
+  redis.call('DEL', unpack(KEYS))
+  return 0
+end
+`
+
 // generationCheckScript is the guard alone: 1 when the index is this generation's, 0 when it was
 // another generation's and has just been dropped. Reads run it first in the same MULTI/EXEC, so
 // what they read after it is either this generation's index or a cold one.
@@ -114,8 +167,10 @@ return 1
 //	ARGV[1] TTL in ms (0: none)   ARGV[2] op   ARGV[3], ARGV[4] op arguments   ARGV[5] generation
 //
 // op is "zadd" (score, member), "mark" (KEYS index of a marker: set it to "1" with the TTL),
-// "unmark" (KEYS index of a marker: delete it), "expire" (apply the TTL to the sorted set) or
-// "stamp" (nothing more).
+// "unmark" (KEYS index of a marker: delete it), "expire" (apply the TTL to the sorted set),
+// "segment" (a TimeSeries range, lowerbound and upperbound: record it in the segment store, the
+// key before the generation marker, and apply the TTL to the store and the sorted set) or "stamp"
+// (nothing more).
 var generationStampScript = redis.NewScript(`
 local ttl = tonumber(ARGV[1])
 local generation = ARGV[#ARGV]
@@ -143,6 +198,13 @@ elseif op == 'expire' then
   if ttl > 0 then
     redis.call('PEXPIRE', KEYS[1], ttl)
   end
+elseif op == 'segment' then
+  local store = KEYS[#KEYS - 1]
+  redis.call('HSET', store, ARGV[3], ARGV[4])
+  if ttl > 0 then
+    redis.call('PEXPIRE', store, ttl)
+    redis.call('PEXPIRE', KEYS[1], ttl)
+  end
 end
 return 1
 `)
@@ -153,8 +215,9 @@ return 1
 //
 //	KEYS sorted set, markers..., generation marker   ARGV members..., generation
 //
-// Returns 1 if the index was this generation's, 0 if it was dropped.
-var generationRemoveScript = redis.NewScript(generationGuard("0") + `
+// Returns 1 if the index was this generation's, 0 if it was another's and has been dropped, -1 if
+// there was no index at all.
+var generationRemoveScript = redis.NewScript(removalGuard + `
 if #ARGV > 1 then
   redis.call('ZREM', KEYS[1], unpack(ARGV, 1, #ARGV - 1))
 end
@@ -165,11 +228,28 @@ return 1
 // first-page and last-page markers: a removal invalidates both.
 //
 //	KEYS sorted set, :firstpage, :lastpage, :blankpage, generation marker   ARGV members..., generation
-var generationTimelineRemoveScript = redis.NewScript(generationGuard("0") + `
+var generationTimelineRemoveScript = redis.NewScript(removalGuard + `
 if #ARGV > 1 then
   redis.call('ZREM', KEYS[1], unpack(ARGV, 1, #ARGV - 1))
 end
 redis.call('DEL', KEYS[2], KEYS[3])
+return 1
+`)
+
+// generationHealScript is a read's self-heal with a generation: it removes the members whose item is
+// gone from an index of this generation, a thousand per ZREM (Lua's unpack takes a few thousand
+// values at most). An index that is not this generation's (any more) is left alone: the members are
+// not this read's to judge, and dropping the index would throw away another build's fresh seed.
+//
+//	KEYS sorted set, markers..., generation marker   ARGV members..., generation
+var generationHealScript = redis.NewScript(`
+if redis.call('GET', KEYS[#KEYS]) ~= ARGV[#ARGV] then
+  return 0
+end
+local last = #ARGV - 1
+for i = 1, last, 1000 do
+  redis.call('ZREM', KEYS[1], unpack(ARGV, i, math.min(i + 999, last)))
+end
 return 1
 `)
 
@@ -184,7 +264,54 @@ var generationSortedIngestScript = redis.NewScript(generationGuard("0") + sorted
 //	ARGV score, member, itemPerPage, direction, generation
 var generationTimelineIngestScript = redis.NewScript(generationGuard("0") + timelineIngestBody)
 
-// ttlMillis renders a TTL for the generation scripts: whole milliseconds, 0 for none.
+// timelineExtendScript is Timeline.Extend: it appends the rows of a top-up to an index that still
+// ends where the top-up started — this generation's index (when there is one) whose tail is the
+// cursor the rows follow — marks the end of the data when the rows ran out, and renews the TTL of
+// the index and its generation marker. Anything else writes nothing: an index that was dropped,
+// purged, reseeded or that expired since its tail was read would otherwise take rows from the
+// middle of the data, and stop being a prefix of it.
+//
+//	KEYS sorted set, :firstpage, :lastpage, :blankpage, generation marker
+//	ARGV[1] TTL in ms (0: none)   ARGV[2] tail score   ARGV[3] tail member   ARGV[4] direction
+//	ARGV[5] "1" when the rows reach the end of the data   ARGV[6 .. #ARGV-1] score, member pairs
+//	ARGV[#ARGV] generation ("" for none)
+//
+// Returns 1 if it applied, 0 if it wrote nothing.
+var timelineExtendScript = redis.NewScript(`
+local generation = ARGV[#ARGV]
+if generation ~= '' and redis.call('GET', KEYS[#KEYS]) ~= generation then
+  return 0
+end
+local rank = 0
+if ARGV[4] == 'asc' then
+  rank = -1
+end
+local tail = redis.call('ZRANGE', KEYS[1], rank, rank, 'WITHSCORES')
+if #tail == 0 or tail[1] ~= ARGV[3] or tonumber(tail[2]) ~= tonumber(ARGV[2]) then
+  return 0
+end
+for i = 6, #ARGV - 1, 2 do
+  redis.call('ZADD', KEYS[1], ARGV[i], ARGV[i + 1])
+end
+local ttl = tonumber(ARGV[1])
+if ARGV[5] == '1' then
+  if ttl > 0 then
+    redis.call('SET', KEYS[3], '1', 'PX', ttl)
+  else
+    redis.call('SET', KEYS[3], '1')
+  end
+end
+if ttl > 0 then
+  redis.call('PEXPIRE', KEYS[1], ttl)
+  if generation ~= '' then
+    redis.call('PEXPIRE', KEYS[#KEYS], ttl)
+  end
+end
+return 1
+`)
+
+// ttlMillis renders a TTL for the generation scripts: whole milliseconds, 0 for none. A TTL of zero
+// or less therefore stores the key without an expiry on this path.
 func ttlMillis(timeToLive time.Duration) int64 {
 	if timeToLive <= 0 {
 		return 0
@@ -199,6 +326,12 @@ func ttlMillis(timeToLive time.Duration) int64 {
 // reports as its error when any of its commands got one.
 func isNilReply(err error) bool {
 	return err == nil || errors.Is(err, redis.Nil)
+}
+
+// generation is the index generation the owner set, "" for none. An operation reads it once and
+// passes it to every command it issues.
+func (cr *SortedSet[T]) generation() string {
+	return cr.gen.load().generation
 }
 
 // generationKeys are the keys a generation script of this collection takes: the sorted set, its
@@ -228,8 +361,8 @@ func (cr *SortedSet[T]) markerPosition(suffix string) (int, error) {
 }
 
 // stamp enqueues one write of a seed into the caller's pipeline, behind the generation stamp (see
-// generationStampScript). Only called with a generation set.
-func (cr *SortedSet[T]) stamp(ctx context.Context, pipe redis.Pipeliner, timeToLive time.Duration, op string, first, second interface{}, keyParams []string) error {
+// generationStampScript). Only called with a generation.
+func (cr *SortedSet[T]) stamp(ctx context.Context, pipe redis.Pipeliner, generation string, timeToLive time.Duration, op string, first, second interface{}, keyParams []string) error {
 	keys, err := cr.generationKeys(keyParams)
 	if err != nil {
 		return err
@@ -240,12 +373,12 @@ func (cr *SortedSet[T]) stamp(ctx context.Context, pipe redis.Pipeliner, timeToL
 	if second == nil {
 		second = ""
 	}
-	generationStampScript.Eval(ctx, pipe, keys, ttlMillis(timeToLive), op, first, second, cr.generation)
+	generationStampScript.Eval(ctx, pipe, keys, ttlMillis(timeToLive), op, first, second, generation)
 	return nil
 }
 
 // stampMarker enqueues setting (or, with set false, deleting) one state marker during a seed.
-func (cr *SortedSet[T]) stampMarker(ctx context.Context, pipe redis.Pipeliner, timeToLive time.Duration, suffix string, set bool, keyParams []string) error {
+func (cr *SortedSet[T]) stampMarker(ctx context.Context, pipe redis.Pipeliner, generation string, timeToLive time.Duration, suffix string, set bool, keyParams []string) error {
 	position, err := cr.markerPosition(suffix)
 	if err != nil {
 		return err
@@ -254,19 +387,19 @@ func (cr *SortedSet[T]) stampMarker(ctx context.Context, pipe redis.Pipeliner, t
 	if set {
 		op = "mark"
 	}
-	return cr.stamp(ctx, pipe, timeToLive, op, position, nil, keyParams)
+	return cr.stamp(ctx, pipe, generation, timeToLive, op, position, nil, keyParams)
 }
 
 // guarded runs read's commands after the generation check, in one MULTI/EXEC, and reports whether
 // the index was this generation's (false: it has just been dropped, and read saw a cold index).
-// Only called with a generation set.
-func (cr *SortedSet[T]) guarded(ctx context.Context, keyParams []string, read func(pipe redis.Pipeliner) error) (bool, error) {
+// Only called with a generation.
+func (cr *SortedSet[T]) guarded(ctx context.Context, generation string, keyParams []string, read func(pipe redis.Pipeliner) error) (bool, error) {
 	keys, err := cr.generationKeys(keyParams)
 	if err != nil {
 		return false, err
 	}
 	pipe := cr.client.TxPipeline()
-	check := generationCheckScript.Eval(ctx, pipe, keys, cr.generation)
+	check := generationCheckScript.Eval(ctx, pipe, keys, generation)
 	if err := read(pipe); err != nil {
 		return false, err
 	}
@@ -282,26 +415,39 @@ func (cr *SortedSet[T]) guarded(ctx context.Context, keyParams []string, read fu
 
 // removeMembers enqueues the removal of members from an index of this generation (see
 // generationRemoveScript); withPageMarkers also drops a Timeline's first- and last-page markers.
-// Only called with a generation set.
-func (cr *SortedSet[T]) removeMembers(ctx context.Context, cmd redis.Scripter, withPageMarkers bool, members []interface{}, keyParams []string) (*redis.Cmd, error) {
+// Only called with a generation.
+func (cr *SortedSet[T]) removeMembers(ctx context.Context, cmd redis.Scripter, generation string, withPageMarkers bool, members []interface{}, keyParams []string) (*redis.Cmd, error) {
 	keys, err := cr.generationKeys(keyParams)
 	if err != nil {
 		return nil, err
 	}
 	args := make([]interface{}, 0, len(members)+1)
 	args = append(args, members...)
-	args = append(args, cr.generation)
+	args = append(args, generation)
 	if withPageMarkers {
 		return generationTimelineRemoveScript.Eval(ctx, cmd, keys, args...), nil
 	}
 	return generationRemoveScript.Eval(ctx, cmd, keys, args...), nil
 }
 
+// removalOutcome reads the reply of a removal script: nil when the index was this generation's or
+// there was none, ErrNotIngested when it was another generation's and has been dropped.
+func removalOutcome(removed *redis.Cmd) error {
+	own, err := removed.Int64()
+	if err != nil {
+		return err
+	}
+	if own == 0 {
+		return ErrNotIngested
+	}
+	return nil
+}
+
 // guardedMarker reads one state marker behind the generation check: false when it is not set, or
 // when the index was another generation's and has just been dropped.
-func (cr *SortedSet[T]) guardedMarker(ctx context.Context, markerKey string, keyParams []string) (bool, error) {
+func (cr *SortedSet[T]) guardedMarker(ctx context.Context, generation string, markerKey string, keyParams []string) (bool, error) {
 	var marker *redis.StringCmd
-	if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+	if _, err := cr.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
 		marker = pipe.Get(ctx, markerKey)
 		return nil
 	}); err != nil {

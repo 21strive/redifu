@@ -33,9 +33,12 @@ type TimeSeries[T Blueprint] struct {
 	// unit is what an int64 score counts since the Unix epoch. A time.Time sorting
 	// reference is always scored in milliseconds.
 	unit time.Duration
-	// generation stamps the index (through sorted) and the segment store, "" for none.
-	generation string
 }
+
+// markerSegments is the suffix of a TimeSeries' segment store when the series has a generation:
+// the store then sits under the index's hash tag, as one of its markers, so that every check that
+// drops the index drops the ranges it claimed with it.
+const markerSegments = ":segments"
 
 func NewTimeSeries[T Blueprint](
 	client redis.UniversalClient,
@@ -56,6 +59,9 @@ func NewTimeSeries[T Blueprint](
 	if errSorted != nil {
 		return nil, errSorted
 	}
+	// With a generation the segment store is the last marker before the generation marker (the
+	// stamp's "segment" op writes KEYS[#KEYS - 1]).
+	sorted.sortedSetClient.markers = []string{markerBlankPage, markerSegments}
 
 	return &TimeSeries[T]{
 		redis:      client,
@@ -151,25 +157,25 @@ func (s *TimeSeries[T]) SetSelfHeal(selfHeal bool) {
 	s.sorted.SetSelfHeal(selfHeal)
 }
 
-// SetGeneration stamps the series with a generation: its index as Sorted.SetGeneration does, and
-// its segment store with a "gen" field. Segments of another generation, or none, are dropped by
-// the first read or AddSegment that finds them, so the ranges they claimed read as gaps and are
-// seeded again; an index of another generation is dropped by the first operation that finds it,
-// and a Fetch over segments of this generation whose index is not this generation's drops the
-// segments too and reports the range as not seeded. The index and the segment store live in
-// different cluster slots, so the two are checked one after the other, never in one script.
-// "" turns it off again.
+// SetGeneration stamps the series with a generation, as Sorted.SetGeneration does. Its segment
+// store — which ranges are seeded — then lives under the index's hash tag ({K}:segments, instead of
+// the untagged K:segments of a series without a generation) and counts as one of the index's
+// markers: whatever drops an index of another generation drops the ranges it claimed in the same
+// command, so they read as gaps and are seeded again, and a seed restamps the two together. Every
+// segment read is behind the check, and AddItem decides coverage and writes in one script. "" turns
+// it off again. It may be changed while the series is in use.
 func (s *TimeSeries[T]) SetGeneration(generation string) error {
-	if err := s.sorted.SetGeneration(generation); err != nil {
-		return err
-	}
-	s.generation = generation
-	return nil
+	return s.sorted.SetGeneration(generation)
 }
 
 // Generation is the generation SetGeneration set, "" for none.
 func (s *TimeSeries[T]) Generation() string {
-	return s.generation
+	return s.sorted.Generation()
+}
+
+// generation is the series' generation as one operation reads it.
+func (s *TimeSeries[T]) generation() string {
+	return s.sorted.sortedSetClient.generation()
 }
 
 func (s *TimeSeries[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
@@ -202,9 +208,14 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		return false, errKey
 	}
 
+	generation := s.generation()
+	if generation != "" {
+		return s.addItemGeneration(ctx, pipe, generation, item, itemScore, keyParams)
+	}
+
 	// The one read this path makes outside the caller's pipeline, before anything is
-	// enqueued. The segment store sits under an untagged key, in another cluster slot
-	// than the index, so no script could read it and write the index atomically.
+	// enqueued. Without a generation the segment store sits under an untagged key, in another
+	// cluster slot than the index, so no script could read it and write the index atomically.
 	covered, errCovered := s.Covers(ctx, s.instantOf(itemScore), keyParams...)
 	if errCovered != nil {
 		return false, errCovered
@@ -226,7 +237,6 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		return false, err
 	}
 
-	var placed *redis.Cmd
 	if covered {
 		// A series is seeded where its segments say so, not where its sorted set holds
 		// members: a range seeded while it had no rows leaves segments and no sorted set
@@ -234,19 +244,9 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		// script, which waits for a non-empty set, dropped the first item of every such
 		// range. This ZADD may be the one that creates the set, so the TTL is applied
 		// too, and the index keeps living at least as long as its segments.
-		if s.generation != "" {
-			// Behind the index's generation guard: an index of another generation is
-			// dropped rather than written into.
-			keys, errKeys := s.sorted.sortedSetClient.generationKeys(keyParams)
-			if errKeys != nil {
-				return false, errKeys
-			}
-			placed = generationTimeSeriesAddScript.Eval(ctx, pipe, keys, formatScore(itemScore), item.GetRandId(), ttlMillis(s.timeToLive), s.generation)
-		} else {
-			pipe.ZAdd(ctx, key, redis.Z{Score: itemScore, Member: item.GetRandId()})
-			if s.timeToLive > 0 {
-				pipe.Expire(ctx, key, s.timeToLive)
-			}
+		pipe.ZAdd(ctx, key, redis.Z{Score: itemScore, Member: item.GetRandId()})
+		if s.timeToLive > 0 {
+			pipe.Expire(ctx, key, s.timeToLive)
 		}
 	}
 
@@ -254,16 +254,43 @@ func (s *TimeSeries[T]) addItem(ctx context.Context, pipe redis.Pipeliner, item 
 		if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
 			return false, errPipe
 		}
-		if placed != nil {
-			own, errOwn := placed.Int64()
-			if errOwn != nil {
-				return false, errOwn
-			}
-			return own == 1, nil
-		}
 	}
 
 	return covered, nil
+}
+
+// addItemGeneration is addItem with a generation: the segment store shares the index's slot, so
+// one script checks the generation, decides whether a segment covers the item and places it.
+// Through a caller's pipeline the outcome is only known after Exec, and false is returned.
+func (s *TimeSeries[T]) addItemGeneration(ctx context.Context, pipe redis.Pipeliner, generation string, item T, itemScore float64, keyParams []string) (bool, error) {
+	keys, err := s.sorted.sortedSetClient.generationKeys(keyParams)
+	if err != nil {
+		return false, err
+	}
+
+	var selfPipe bool
+	if pipe == nil {
+		pipe = s.redis.Pipeline()
+		selfPipe = true
+	}
+
+	if err := s.sorted.baseClient.WithPipeline(pipe).SetIfAbsent(ctx, item); err != nil {
+		return false, err
+	}
+	placed := generationTimeSeriesAddScript.Eval(ctx, pipe, keys,
+		formatScore(itemScore), item.GetRandId(), s.instantOf(itemScore).UnixMilli(), ttlMillis(s.timeToLive), generation)
+
+	if !selfPipe {
+		return false, nil
+	}
+	if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
+		return false, errPipe
+	}
+	own, err := placed.Int64()
+	if err != nil {
+		return false, err
+	}
+	return own == 1, nil
 }
 
 // AddItem stores the item in Base if it is not there yet, always refreshes its TTL, and
@@ -288,7 +315,7 @@ func (s *TimeSeries[T]) IngestItem(ctx context.Context, pipe redis.Pipeliner, it
 	if err := s.sorted.IngestItem(ctx, pipe, item, true, keyParams...); err != nil {
 		return err
 	}
-	if s.generation != "" {
+	if s.generation() != "" {
 		// The stamped expire also renews the generation marker with the index.
 		return s.sorted.SetExpiration(ctx, pipe, keyParams...)
 	}
@@ -324,6 +351,15 @@ func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lo
 		return err
 	}
 
+	if generation := s.generation(); generation != "" {
+		// A seed write: the stamp drops an index of another generation (its segments with it),
+		// stamps the marker — even when the range holds no rows and no sorted set exists, the
+		// marker is what says the range was seeded by this generation — records the range and
+		// renews the TTL of the store and the index.
+		return s.sorted.sortedSetClient.stamp(ctx, pipe, generation, s.timeToLive, "segment",
+			strconv.FormatInt(lowerbound.UnixMilli(), 10), upperbound.UnixMilli(), segmentStoreKeyParams)
+	}
+
 	segmentStoreKey, errKey := s.segments.build(segmentStoreKeyParams)
 	if errKey != nil {
 		return errKey
@@ -331,14 +367,6 @@ func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lo
 	indexKey, errIndexKey := s.sorted.sortedSetClient.key(segmentStoreKeyParams)
 	if errIndexKey != nil {
 		return errIndexKey
-	}
-
-	if s.generation != "" {
-		generationAddSegmentScript.Eval(ctx, pipe, []string{segmentStoreKey},
-			strconv.FormatInt(lowerbound.UnixMilli(), 10), upperbound.UnixMilli(), ttlMillis(s.timeToLive), s.generation)
-		// The index is stamped too, even when the range holds no rows and no sorted set
-		// exists: its marker is what says the range was seeded by this generation.
-		return s.sorted.SetExpiration(ctx, pipe, segmentStoreKeyParams...)
 	}
 
 	pipe.HSet(ctx, segmentStoreKey, strconv.FormatInt(lowerbound.UnixMilli(), 10), upperbound.UnixMilli())
@@ -355,22 +383,29 @@ func (s *TimeSeries[T]) AddSegment(ctx context.Context, pipe redis.Pipeliner, lo
 }
 
 func (s *TimeSeries[T]) allSegments(ctx context.Context, keyParams []string) ([][]int64, error) {
-	segmentStoreKey, errKey := s.segments.build(keyParams)
-	if errKey != nil {
-		return nil, errKey
-	}
-
 	var result map[string]string
-	if s.generation != "" {
-		pairs, err := generationSegmentsScript.Eval(ctx, s.redis, []string{segmentStoreKey}, s.generation).StringSlice()
+	if generation := s.generation(); generation != "" {
+		storeKey, errKey := s.sorted.sortedSetClient.markerKey(markerSegments, keyParams)
+		if errKey != nil {
+			return nil, errKey
+		}
+		var read *redis.MapStringStringCmd
+		if _, err := s.sorted.sortedSetClient.guarded(ctx, generation, keyParams, func(pipe redis.Pipeliner) error {
+			read = pipe.HGetAll(ctx, storeKey)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("redifu: failed to read segments: %w", err)
+		}
+		pairs, err := read.Result()
 		if err != nil {
 			return nil, fmt.Errorf("redifu: failed to read segments: %w", err)
 		}
-		result = make(map[string]string, len(pairs)/2)
-		for i := 0; i+1 < len(pairs); i += 2 {
-			result[pairs[i]] = pairs[i+1]
-		}
+		result = pairs
 	} else {
+		segmentStoreKey, errKey := s.segments.build(keyParams)
+		if errKey != nil {
+			return nil, errKey
+		}
 		read, err := s.redis.HGetAll(ctx, segmentStoreKey).Result()
 		if err != nil {
 			return nil, fmt.Errorf("redifu: failed to read segments: %w", err)
@@ -378,6 +413,12 @@ func (s *TimeSeries[T]) allSegments(ctx context.Context, keyParams []string) ([]
 		result = read
 	}
 
+	return parseSegments(result), nil
+}
+
+// parseSegments turns a segment store (lowerbound → upperbound, in milliseconds) into ranges
+// sorted by lower bound, skipping any field that is not one.
+func parseSegments(result map[string]string) [][]int64 {
 	segments := make([][]int64, 0, len(result))
 	for lowerStr, upperStr := range result {
 		lower, err1 := strconv.ParseInt(lowerStr, 10, 64)
@@ -389,7 +430,7 @@ func (s *TimeSeries[T]) allSegments(ctx context.Context, keyParams []string) ([]
 	}
 
 	sort.Slice(segments, func(i, j int) bool { return segments[i][0] < segments[j][0] })
-	return segments, nil
+	return segments
 }
 
 // validateNoOverlap ensures the new segment doesn't overlap with any existing segment.
@@ -511,20 +552,32 @@ func (s *TimeSeries[T]) Fetch(lowerbound time.Time, upperbound time.Time) *fetch
 	}
 }
 
-// Remove deletes a segment from the segment store by its lowerbound.
+// Remove deletes a segment from the segment store by its lowerbound. With a generation it is
+// behind the guard: a store of another generation is dropped with its index instead.
 func (s *TimeSeries[T]) Remove(ctx context.Context, lowerbound time.Time, segmentStoreKeyParams ...string) error {
+	field := strconv.FormatInt(lowerbound.UnixMilli(), 10)
+	if generation := s.generation(); generation != "" {
+		keys, err := s.sorted.sortedSetClient.generationKeys(segmentStoreKeyParams)
+		if err != nil {
+			return err
+		}
+		return generationRemoveSegmentScript.Eval(ctx, s.redis, keys, field, generation).Err()
+	}
+
 	segmentStoreKey, errKey := s.segments.build(segmentStoreKeyParams)
 	if errKey != nil {
 		return errKey
 	}
 
-	return s.redis.HDel(ctx, segmentStoreKey, strconv.FormatInt(lowerbound.UnixMilli(), 10)).Err()
+	return s.redis.HDel(ctx, segmentStoreKey, field).Err()
 }
 
 // Purge invalidates the series: the sorted set, its blank-page marker and the record
 // of which ranges have been seeded are all dropped, so the next fetch rebuilds from
 // the database. Item keys are left alone. Without this, purging the sorted set alone
-// left the segment store claiming ranges that no longer held any data.
+// left the segment store claiming ranges that no longer held any data. The sorted set's
+// keys include the generation marker and the tagged segment store of a series with a
+// generation; the untagged store is the one of a series without.
 func (s *TimeSeries[T]) Purge(ctx context.Context, keyParams ...string) error {
 	if err := s.sorted.Purge(ctx, keyParams...); err != nil {
 		return err
@@ -545,12 +598,7 @@ func (s *TimeSeries[T]) GetSegments(ctx context.Context, keyParams ...string) ([
 
 // Exists checks if a segment with the given lowerbound exists.
 func (s *TimeSeries[T]) Exists(ctx context.Context, lowerbound time.Time, keyParams ...string) (bool, error) {
-	segmentStoreKey, errKey := s.segments.build(keyParams)
-	if errKey != nil {
-		return false, errKey
-	}
-
-	if s.generation != "" {
+	if s.generation() != "" {
 		segments, err := s.allSegments(ctx, keyParams)
 		if err != nil {
 			return false, err
@@ -563,22 +611,27 @@ func (s *TimeSeries[T]) Exists(ctx context.Context, lowerbound time.Time, keyPar
 		return false, nil
 	}
 
+	segmentStoreKey, errKey := s.segments.build(keyParams)
+	if errKey != nil {
+		return false, errKey
+	}
+
 	return s.redis.HExists(ctx, segmentStoreKey, strconv.FormatInt(lowerbound.UnixMilli(), 10)).Result()
 }
 
 // CountSegments returns the total number of segments stored.
 func (s *TimeSeries[T]) CountSegments(ctx context.Context, keyParams ...string) (int64, error) {
-	segmentStoreKey, errKey := s.segments.build(keyParams)
-	if errKey != nil {
-		return 0, errKey
-	}
-
-	if s.generation != "" {
+	if s.generation() != "" {
 		segments, err := s.allSegments(ctx, keyParams)
 		if err != nil {
 			return 0, err
 		}
 		return int64(len(segments)), nil
+	}
+
+	segmentStoreKey, errKey := s.segments.build(keyParams)
+	if errKey != nil {
+		return 0, errKey
 	}
 
 	return s.redis.HLen(ctx, segmentStoreKey).Result()
@@ -615,16 +668,16 @@ func (f *fetchTimeSeriesBuilder[T]) Exec(ctx context.Context) ([]T, bool, error)
 		return nil, false, err
 	}
 
+	if generation := f.timeSeries.generation(); generation != "" {
+		return f.execGeneration(ctx, generation)
+	}
+
 	gaps, errFindGaps := f.timeSeries.FindGap(ctx, f.lowerbound, f.upperbound, f.keyParams...)
 	if errFindGaps != nil {
 		return nil, false, errFindGaps
 	}
 	if len(gaps) > 0 {
 		return nil, true, nil
-	}
-
-	if f.timeSeries.generation != "" {
-		return f.execGeneration(ctx)
 	}
 
 	// processorArgs is forwarded with ... — without it the consumer's arguments arrive
@@ -642,21 +695,26 @@ func (f *fetchTimeSeriesBuilder[T]) Exec(ctx context.Context) ([]T, bool, error)
 	return result, false, nil
 }
 
-// execGeneration is Exec past the gap check for a series with a generation. Segments of this
-// generation say the range is seeded, but the index lives in another slot and is checked on its
-// own: when it turns out not to be this generation's (another generation reseeded it, or its
-// marker expired first), the range is not seeded after all — the segments are dropped and Exec
-// reports the gap instead of answering an empty range.
-func (f *fetchTimeSeriesBuilder[T]) execGeneration(ctx context.Context) ([]T, bool, error) {
+// execGeneration is Exec for a series with a generation. The segment store and the index share a
+// slot, so the segments, the members and the check that both are this generation's are read in one
+// MULTI/EXEC: an index of another generation (or none) is dropped with its segments by the check,
+// and the range then reads as a gap, never as seeded and empty.
+func (f *fetchTimeSeriesBuilder[T]) execGeneration(ctx context.Context, generation string) ([]T, bool, error) {
 	series := f.timeSeries
 	set := series.sorted.sortedSetClient
 	key, err := set.key(f.keyParams)
 	if err != nil {
 		return nil, false, err
 	}
+	storeKey, err := set.markerKey(markerSegments, f.keyParams)
+	if err != nil {
+		return nil, false, err
+	}
 
+	var stored *redis.MapStringStringCmd
 	var members *redis.StringSliceCmd
-	own, err := set.guarded(ctx, f.keyParams, func(pipe redis.Pipeliner) error {
+	own, err := set.guarded(ctx, generation, f.keyParams, func(pipe redis.Pipeliner) error {
+		stored = pipe.HGetAll(ctx, storeKey)
 		members = pipe.ZRevRangeByScore(ctx, key, &redis.ZRangeBy{
 			Min: formatScore(float64(series.scoreAt(f.lowerbound))),
 			Max: formatScore(float64(series.scoreAt(f.upperbound))),
@@ -667,13 +725,21 @@ func (f *fetchTimeSeriesBuilder[T]) execGeneration(ctx context.Context) ([]T, bo
 		return nil, false, err
 	}
 	if !own {
-		segmentStoreKey, errKey := series.segments.build(f.keyParams)
-		if errKey != nil {
-			return nil, false, errKey
+		return nil, true, nil
+	}
+
+	pairs, err := stored.Result()
+	if err != nil {
+		return nil, false, fmt.Errorf("redifu: failed to read segments: %w", err)
+	}
+	lower, upper := f.lowerbound.UnixMilli(), f.upperbound.UnixMilli()
+	intersecting := make([][]int64, 0)
+	for _, segment := range parseSegments(pairs) {
+		if segment[1] > lower && segment[0] < upper {
+			intersecting = append(intersecting, segment)
 		}
-		if errDel := series.redis.Del(ctx, segmentStoreKey).Err(); errDel != nil {
-			return nil, false, errDel
-		}
+	}
+	if len(series.calculateGaps(intersecting, lower, upper)) > 0 {
 		return nil, true, nil
 	}
 
@@ -701,14 +767,31 @@ func (f *fetchTimeSeriesBuilder[T]) execGeneration(ctx context.Context) ([]T, bo
 	return items, false, nil
 }
 
-// generationTimeSeriesAddScript places an item into a series index of a generation: the index
-// is dropped instead when it is another generation's, and its TTL and its marker's are renewed
-// together when it is not.
+// generationTimeSeriesAddScript is AddItem for a series with a generation: behind the guard (an
+// index of another generation is dropped, its segments with it), it places the item when a
+// segment covers its instant — both bounds inclusive, as Covers — and renews the TTL of the index
+// and of its generation marker. Coverage and the write are one atomic step.
 //
-//	KEYS sorted set, :blankpage, generation marker   ARGV score, member, TTL in ms, generation
+//	KEYS sorted set, :blankpage, :segments, generation marker
+//	ARGV score, member, instant in ms, TTL in ms, generation
+//
+// Returns 1 if it placed the item, 0 if no segment covers it or the index was dropped.
 var generationTimeSeriesAddScript = redis.NewScript(generationGuard("0") + `
+local at = tonumber(ARGV[3])
+local segments = redis.call('HGETALL', KEYS[#KEYS - 1])
+local covered = false
+for i = 1, #segments, 2 do
+  local lower, upper = tonumber(segments[i]), tonumber(segments[i + 1])
+  if lower and upper and lower <= at and at <= upper then
+    covered = true
+    break
+  end
+end
+if not covered then
+  return 0
+end
 redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
-local ttl = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
 if ttl > 0 then
   redis.call('PEXPIRE', KEYS[1], ttl)
   redis.call('PEXPIRE', KEYS[#KEYS], ttl)
@@ -716,30 +799,11 @@ end
 return 1
 `)
 
-// generationSegmentsScript reads a segment store of a generation: a store whose "gen" field holds
-// another generation, or none, is dropped and reads as empty.
+// generationRemoveSegmentScript is Remove for a series with a generation: the segment's field is
+// deleted from a store of this generation; a store of another generation is dropped with its index.
 //
-//	KEYS[1] segment store   ARGV[1] generation
-var generationSegmentsScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], 'gen') ~= ARGV[1] then
-  redis.call('DEL', KEYS[1])
-  return {}
-end
-return redis.call('HGETALL', KEYS[1])
-`)
-
-// generationAddSegmentScript records a seeded segment in a store of a generation, starting the
-// store afresh when it holds another generation's segments.
-//
-//	KEYS[1] segment store   ARGV[1] lowerbound   ARGV[2] upperbound   ARGV[3] TTL in ms   ARGV[4] generation
-var generationAddSegmentScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], 'gen') ~= ARGV[4] then
-  redis.call('DEL', KEYS[1])
-end
-redis.call('HSET', KEYS[1], 'gen', ARGV[4], ARGV[1], ARGV[2])
-local ttl = tonumber(ARGV[3])
-if ttl > 0 then
-  redis.call('PEXPIRE', KEYS[1], ttl)
-end
+//	KEYS sorted set, :blankpage, :segments, generation marker   ARGV lowerbound, generation
+var generationRemoveSegmentScript = redis.NewScript(generationGuard("0") + `
+redis.call('HDEL', KEYS[#KEYS - 1], ARGV[1])
 return 1
 `)
