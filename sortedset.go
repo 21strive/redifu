@@ -15,6 +15,14 @@ type SortedSet[T Blueprint] struct {
 	// selfHeal removes index members whose item key no longer exists. Without it an
 	// index decays into a set of dangling randIds that quietly shortens every page.
 	selfHeal bool
+	// markers are the suffixes of the collection's state markers, in the order the
+	// generation scripts take them: :blankpage for a Sorted; :firstpage, :lastpage and
+	// :blankpage for a Timeline.
+	markers []string
+	// generation is the index generation its owner set (Sorted.SetGeneration,
+	// Timeline.SetGeneration), "" for none. The reads below check it; the writes are made
+	// by the owner, which knows the TTL a stamp needs.
+	generation string
 }
 
 func NewSortedSet[T Blueprint](client redis.UniversalClient, sortedSetKeyFormat string) (*SortedSet[T], error) {
@@ -36,6 +44,7 @@ func (cr *SortedSet[T]) Init(client redis.UniversalClient, sortedSetKeyFormat st
 	cr.client = client
 	cr.keys = keys
 	cr.selfHeal = true
+	cr.markers = []string{markerBlankPage}
 	return nil
 }
 
@@ -97,6 +106,17 @@ func (cr *SortedSet[T]) Count(ctx context.Context, keyParams ...string) (int64, 
 		return 0, err
 	}
 
+	if cr.generation != "" {
+		var count *redis.IntCmd
+		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			count = pipe.ZCard(ctx, key)
+			return nil
+		}); err != nil {
+			return 0, err
+		}
+		return count.Result()
+	}
+
 	return cr.client.ZCard(ctx, key).Result()
 }
 
@@ -129,7 +149,19 @@ func (cr *SortedSet[T]) edgeScore(ctx context.Context, lowest bool, keyParams []
 		start, stop = -1, -1
 	}
 
-	result, err := cr.client.ZRangeWithScores(ctx, key, start, stop).Result()
+	var result []redis.Z
+	var err error
+	if cr.generation != "" {
+		var edge *redis.ZSliceCmd
+		if _, err = cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			edge = pipe.ZRangeWithScores(ctx, key, start, stop)
+			return nil
+		}); err == nil {
+			result, err = edge.Result()
+		}
+	} else {
+		result, err = cr.client.ZRangeWithScores(ctx, key, start, stop).Result()
+	}
 	if err != nil {
 		return 0, fmt.Errorf("redifu: failed to read edge score: %w", err)
 	}
@@ -160,25 +192,35 @@ func (cr *SortedSet[T]) rangeMembers(
 		return nil, errKey
 	}
 
-	var result *redis.StringSliceCmd
-	if byScore {
-		reqRange := redis.ZRangeBy{
-			Min: formatScore(float64(start)),
-			Max: formatScore(float64(stop)),
+	read := func(cmd redis.Cmdable) *redis.StringSliceCmd {
+		if byScore {
+			reqRange := redis.ZRangeBy{
+				Min: formatScore(float64(start)),
+				Max: formatScore(float64(stop)),
+			}
+			if direction == Descending {
+				return cmd.ZRevRangeByScore(ctx, key, &reqRange)
+			}
+			return cmd.ZRangeByScore(ctx, key, &reqRange)
 		}
 		if direction == Descending {
-			result = cr.client.ZRevRangeByScore(ctx, key, &reqRange)
-		} else {
-			result = cr.client.ZRangeByScore(ctx, key, &reqRange)
+			return cmd.ZRevRange(ctx, key, start, stop)
 		}
-	} else {
-		if direction == Descending {
-			result = cr.client.ZRevRange(ctx, key, start, stop)
-		} else {
-			result = cr.client.ZRange(ctx, key, start, stop)
-		}
+		return cmd.ZRange(ctx, key, start, stop)
 	}
 
+	if cr.generation != "" {
+		var result *redis.StringSliceCmd
+		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			result = read(pipe)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		return result.Result()
+	}
+
+	result := read(cr.client)
 	if result.Err() != nil {
 		return nil, result.Err()
 	}
@@ -216,12 +258,25 @@ func (cr *SortedSet[T]) scoreRangeMembers(
 	}
 
 	bounds := redis.ZRangeBy{Min: lower, Max: upper, Offset: offset, Count: count}
-	var result *redis.StringSliceCmd
-	if direction == Descending {
-		result = cr.client.ZRevRangeByScore(ctx, key, &bounds)
-	} else {
-		result = cr.client.ZRangeByScore(ctx, key, &bounds)
+	read := func(cmd redis.Cmdable) *redis.StringSliceCmd {
+		if direction == Descending {
+			return cmd.ZRevRangeByScore(ctx, key, &bounds)
+		}
+		return cmd.ZRangeByScore(ctx, key, &bounds)
 	}
+
+	if cr.generation != "" {
+		var result *redis.StringSliceCmd
+		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			result = read(pipe)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		return result.Result()
+	}
+
+	result := read(cr.client)
 	if result.Err() != nil {
 		return nil, result.Err()
 	}
@@ -248,11 +303,23 @@ func (cr *SortedSet[T]) rangeWithScores(
 		return nil, nil, errKey
 	}
 
+	read := func(cmd redis.Cmdable) *redis.ZSliceCmd {
+		if direction == Descending {
+			return cmd.ZRevRangeWithScores(ctx, key, start, stop)
+		}
+		return cmd.ZRangeWithScores(ctx, key, start, stop)
+	}
+
 	var result *redis.ZSliceCmd
-	if direction == Descending {
-		result = cr.client.ZRevRangeWithScores(ctx, key, start, stop)
+	if cr.generation != "" {
+		if _, err := cr.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			result = read(pipe)
+			return nil
+		}); err != nil {
+			return nil, nil, err
+		}
 	} else {
-		result = cr.client.ZRangeWithScores(ctx, key, start, stop)
+		result = read(cr.client)
 	}
 	if result.Err() != nil {
 		return nil, nil, result.Err()
@@ -313,8 +380,14 @@ func (cr *SortedSet[T]) hydrate(
 
 	if len(dangling) > 0 && cr.selfHeal {
 		// Best effort. The read succeeded; failing it because the cleanup did not
-		// would trade a working page for a housekeeping error.
-		if key, err := cr.key(keyParams); err == nil {
+		// would trade a working page for a housekeeping error. With a generation the
+		// removal is guarded: the index may have become another generation's since it
+		// was read, and that one's members are not this read's to remove.
+		if cr.generation != "" {
+			if cmd, err := cr.removeMembers(ctx, cr.client, false, dangling, keyParams); err == nil {
+				_ = cmd.Err()
+			}
+		} else if key, err := cr.key(keyParams); err == nil {
 			cr.client.ZRem(ctx, key, dangling...)
 		}
 	}
