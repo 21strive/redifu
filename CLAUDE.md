@@ -223,6 +223,51 @@ parameter count is checked on every call, and parameters may not be empty or con
 `{`/`}`. Derived keys always copy the caller's slice — spreading a variadic argument
 hands the callee the caller's own backing array.
 
+A key names data, never a version of it: `post:%s`, not `post:v3:%s`. Which build wrote a
+value or seeded an index is the generation's job (next section).
+
+## Generations
+
+A consumer changes what it stores — an entity gains a field, a list's membership rule or
+score changes — and must then stop reading what the earlier build wrote. A version segment in
+the key name did that once and stuck: every bump turned the whole cache cold, and during a
+rolling deploy the old process kept writing the old names while the new one served the new
+names, so the old one's changes never reached them. A generation keeps one name per piece of
+data and puts the version into the stored state (`generation.go`):
+
+| | `SetGeneration` on | Stored as | Another generation's (or none) |
+|---|---|---|---|
+| Item | `Base` | the value, prefixed `<generation>\x1f` | a missing key: `ErrNotFound`, absent from `GetMany`, dangling in an index, a nil relation; `SetIfAbsent` replaces it, `Exists` is false |
+| Index | `Sorted`, `Timeline`, `Page`, `TimeSeries` | a marker `{K}:gen` next to the other markers, with the index TTL (a `TimeSeries` also keeps a `gen` field in its segment store) | the index is not there: the operation that finds it drops the sorted set and **all** its markers first, in the same command, then does its own work on the cold index |
+
+How each kind of operation applies it, with a generation set:
+
+- **Reads** (`Fetch`/`FetchFrom`/`Exec`, `Count`, `IsEmpty`, `RequiresSeeding`, `ReachedEnd`,
+  `Tail`, the `Is…Page` markers) run `generationCheckScript` and then their own commands in one
+  `MULTI/EXEC` (`SortedSet.guarded`). After the check the index is this generation's or gone,
+  so a read never sees another generation's members or markers.
+- **Writes outside a seed** (`AddItem`, `RemoveItem`, self-heal) are scripts behind
+  `generationGuard`: on a foreign index they drop it and report it (`ErrNotIngested` /
+  0). Dropping is the only safe answer — another generation's members follow rules this
+  build does not know, and leaving its index unchanged would leave it stale.
+- **Seed writes** (`IngestItem` with seed = true, `MarkEmpty`, `MarkLastPage`, `MarkFirstPage`,
+  the `Unmark` methods, `HasData`, `SetExpiration`, `AddSegment`) go through
+  `generationStampScript`: drop a foreign index, stamp the marker with the TTL, then write.
+  The first write of a seed therefore starts from an empty index. A seed must run in one
+  `MULTI/EXEC` for that to hold: interleaved with another generation's seed, a plain pipeline
+  could end up holding a part of each.
+- `Purge` drops the `:gen` marker with the rest, with or without a generation.
+
+The generation scripts take the collection's keys in one order — the sorted set, its markers
+(`SortedSet.markers`: `:blankpage` for a `Sorted`; `:firstpage`, `:lastpage`, `:blankpage` for a
+`Timeline`), the generation marker last — and the generation as the last argument, so the
+guard reads `KEYS[#KEYS]` / `ARGV[#ARGV]` and drops with `DEL unpack(KEYS)`. The ingest scripts
+with a generation are the scripts without one behind that guard (`sortedIngestBody`,
+`timelineIngestBody`), so the two can never drift apart.
+
+Without `SetGeneration` nothing changes: no prefix, no marker, the original commands and
+scripts. Every generation scenario is in `generation_test.go` and runs in `TestRealRedis`.
+
 ## Timeline state markers
 
 Timeline stores pagination state via additional Redis keys:
@@ -232,6 +277,7 @@ Timeline stores pagination state via additional Redis keys:
 | `:blankpage` | `"1"` | Sorted set confirmed empty from DB |
 | `:lastpage`  | `"1"` | The index reaches the end of the data: a seed got fewer rows than it asked for |
 | `:firstpage` | `"1"` | Legacy: the original first-page seed returned less than a page. The documented flow no longer sets it |
+| `:gen`       | the generation | Which generation seeded the index (only with `SetGeneration`; see Generations) |
 
 These markers are set by seeders. Do not set them manually outside of a seeder.
 
@@ -361,6 +407,7 @@ original flow, whose handler seeded the first page only.
 6. **`AddItem` places an item into an index; it does not update the item.** It writes the item only when `Base` does not hold it yet, but always refreshes its TTL — so an index can never outlive the items it points at. To change an item's contents, use `Base.Set`.
 7. **An outcome is reported, never swallowed.** `AddItem` returns `ErrNotIngested` when it stored the item but did not index it. `Count` returns an error rather than folding a Redis failure into `0`. A `Sorted` or `Page` read reports the members it dropped because their item was gone (`ExecReport`), the way a Timeline read reports `Dangling()`. A randId cursor that has left the index returns `ErrResetPagination` rather than silently serving page one; a position cursor (`FetchFrom`) needs no such escape, because the page after a position exists whether or not its member does. Page position is read from the index, not from how many items survived hydration.
 8. **Errors are redifu's own.** `ErrNotFound`, never `redis.Nil`, crosses the public API.
+9. **A generation is checked by the command that acts on it.** With `SetGeneration`, every read of an index runs behind the check in the same `MULTI/EXEC`, every write behind the guard or the stamp in the same script, and a Base value is compared with its prefix on every read. A check in one round trip and the work in the next would let another generation slip in between.
 
 ---
 
@@ -370,4 +417,5 @@ original flow, whose handler seeded the first page only.
 - New methods that need a pipeline: follow the `publicMethod` (creates selfPipe) + `privateMethod` (receives pipe parameter) pattern.
 - A function that receives a pipeline must not issue reads of its own either. If it needs to read state before it writes, that belongs in a Lua script enqueued into the same pipeline.
 - Every new key goes through `keyBuilder`; every derived parameter list goes through `appendParams`.
+- A new index operation handles the generation: a read goes through `SortedSet.guarded`, a seed write through `stamp`, any other write through a script behind `generationGuard`; a new marker joins `SortedSet.markers` so the guard drops it too. Add its scenario to `generation_test.go` and `TestRealRedis`.
 - Do not reintroduce SQL into this package. Anything that needs a database belongs in the consumer, driven by the seeding primitives above.

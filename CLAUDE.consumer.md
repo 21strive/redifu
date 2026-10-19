@@ -1089,6 +1089,41 @@ every account in it reflects the change — no feed purged, no page reseeded, an
 
 ---
 
+## Generations — when what you store changes
+
+Never put a version into a key format (`post:v3:%s`). Bumping it turns the whole cache cold at
+once, and during a rolling deploy the old process keeps writing the old names while the new one
+serves the new names — whatever the old one changes never reaches them. Give the cache a
+generation instead; the key names stay the same for good.
+
+```go
+// Base: the shape of what the Base stores. The cache stays warm across every build that does
+// not change it, and reloads on the first build that does.
+postBase.SetGeneration(postShape)     // e.g. a hash of the struct's fields, types and tags
+
+// Index: the build. Which rows a list holds and how they are scored is code, not type
+// information, so only a new build can be trusted to have kept it.
+postTimeline.SetGeneration(buildCommit)
+```
+
+- A value without the Base's generation — written before it, or by a build of another shape —
+  reads as a missing key: `Get` returns `ErrNotFound`, `GetMany` leaves it out, an index counts
+  its member as dangling, a relation stays nil. Your miss path reloads it from the database.
+- An index without the index's generation is not there: whatever touches it first drops it
+  (`{K}`, its markers, `{K}:gen`) and carries on with a cold index — a read seeds it, `AddItem` /
+  `RemoveItem` return `ErrNotIngested`, a seed starts empty and stamps it.
+- Two builds of different generations can share one Redis, as they do while a deploy rolls:
+  each serves only what it wrote, and a write by either one removes the other's index instead
+  of leaving it stale. Expect each list both builds read to be reseeded during the overlap.
+- **Seed in one `MULTI/EXEC`** (`client.TxPipeline()`) once an index has a generation: the
+  seed's first write drops another generation's index, and in a plain pipeline another
+  generation's seed could interleave with yours.
+- Generations are opt-in. Without `SetGeneration` nothing about the stored values or the keys
+  changes.
+
+A generation is at most 128 bytes without control characters; set it right after the
+constructor, before the Base or index is used.
+
 ## Project conventions
 
 - Individual item (`Base`) TTL: **7 days**
@@ -1128,3 +1163,5 @@ every account in it reflects the change — no feed purged, no page reseeded, an
 - Do not seed a `TimeSeries` range without `AddSegment` — the range will be re-queried on every request. `AddSegment` also keeps the index TTL in step with the segments; there is no separate `SetExpiration` to remember
 - Do not sort by a snowflake id — an `int64` score beyond 2^53 is refused, because a float64 cannot hold it exactly and the index would reorder itself silently
 - Do not register a relation on an index when it belongs to the entity — `Base.AddRelation` makes it resolve everywhere, `index.AddRelation` only in that index
+- Do not put a version into a key format to invalidate what an older build stored — set a generation (`SetGeneration`) and keep the name
+- Do not seed an index that has a generation through a plain pipeline — use `TxPipeline`, so the seed's first write and the rest land together
