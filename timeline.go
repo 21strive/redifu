@@ -134,6 +134,9 @@ func (cr *Timeline[T]) Init(client redis.UniversalClient, baseClient *Base[T], s
 	cr.client = client
 	cr.baseClient = baseClient
 	cr.sortedSetClient = sortedSetClient
+	// The order the generation scripts take the markers in; the Timeline ingest and remove
+	// scripts address them by position.
+	cr.sortedSetClient.markers = []string{markerFirstPage, markerLastPage, markerBlankPage}
 	cr.itemPerPage = itemPerPage
 	cr.direction = direction
 	cr.scorer = defaultScorer
@@ -172,7 +175,30 @@ func (cr *Timeline[T]) SetSelfHeal(selfHeal bool) {
 	cr.sortedSetClient.SetSelfHeal(selfHeal)
 }
 
+// SetGeneration stamps the index with a generation, as Sorted.SetGeneration does: an index whose
+// {K}:gen marker holds another generation, or none, is dropped — the sorted set, its three state
+// markers and the generation marker — by the first operation that finds it. A fetch then reads a
+// cold index (an empty first page; a randId cursor answers ErrResetPagination), Count is 0,
+// ReachedEnd is false so the top-up flow seeds it, AddItem and RemoveItem report ErrNotIngested,
+// and a seed (IngestItem with seed = true, the Mark/Unmark methods, HasData, SetExpiration)
+// starts from an empty index and stamps it. Run each seed in one MULTI/EXEC. "" turns it off.
+func (cr *Timeline[T]) SetGeneration(generation string) error {
+	if err := validateGeneration(generation); err != nil {
+		return err
+	}
+	cr.sortedSetClient.generation = generation
+	return nil
+}
+
+// Generation is the index generation SetGeneration set, "" for none.
+func (cr *Timeline[T]) Generation() string {
+	return cr.sortedSetClient.generation
+}
+
 func (cr *Timeline[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	if cr.sortedSetClient.generation != "" {
+		return cr.sortedSetClient.stamp(ctx, pipe, cr.timeToLive, "expire", nil, nil, keyParams)
+	}
 	return cr.sortedSetClient.SetExpiration(ctx, pipe, cr.timeToLive, keyParams...)
 }
 
@@ -202,7 +228,18 @@ func (cr *Timeline[T]) Tail(ctx context.Context, keyParams ...string) (Cursor, b
 		rank = -1
 	}
 
-	result, err := cr.client.ZRangeWithScores(ctx, key, rank, rank).Result()
+	var result []redis.Z
+	if cr.sortedSetClient.generation != "" {
+		var tail *redis.ZSliceCmd
+		if _, err = cr.sortedSetClient.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			tail = pipe.ZRangeWithScores(ctx, key, rank, rank)
+			return nil
+		}); err == nil {
+			result, err = tail.Result()
+		}
+	} else {
+		result, err = cr.client.ZRangeWithScores(ctx, key, rank, rank).Result()
+	}
 	if err != nil {
 		return Cursor{}, false, err
 	}
@@ -302,11 +339,30 @@ func (cr *Timeline[T]) ingest(ctx context.Context, pipe redis.Pipeliner, item T,
 		return nil, err
 	}
 
+	generation := cr.sortedSetClient.generation
+
 	if seed {
+		if generation != "" {
+			if errStamp := cr.sortedSetClient.stamp(ctx, pipe, cr.timeToLive, "zadd", formatScore(score), item.GetRandId(), keyParams); errStamp != nil {
+				return nil, errStamp
+			}
+			return nil, nil
+		}
 		if errSet := cr.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...); errSet != nil {
 			return nil, errSet
 		}
 		return nil, nil
+	}
+
+	if generation != "" {
+		keys, errKeys := cr.sortedSetClient.generationKeys(keyParams)
+		if errKeys != nil {
+			return nil, errKeys
+		}
+		return generationTimelineIngestScript.Eval(
+			ctx, pipe, keys,
+			formatScore(score), item.GetRandId(), cr.itemPerPage, cr.direction, generation,
+		), nil
 	}
 
 	key, errKey := cr.sortedSetClient.key(keyParams)
@@ -330,6 +386,27 @@ func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 	// Only the index is touched. The item stays in Base, because it may well be a member
 	// of other collections; deleting the entity itself is Base.Del's job.
+	if cr.sortedSetClient.generation != "" {
+		// One script: the member and both page marks go together, or an index of another
+		// generation is dropped whole.
+		removed, err := cr.sortedSetClient.removeMembers(ctx, pipe, true, []interface{}{item.GetRandId()}, keyParams)
+		if err != nil {
+			return err
+		}
+		if !selfPipe {
+			return nil
+		}
+		if _, errPipe := pipe.Exec(ctx); errPipe != nil {
+			return errPipe
+		}
+		if own, errOwn := removed.Int64(); errOwn != nil {
+			return errOwn
+		} else if own == 0 {
+			return ErrNotIngested
+		}
+		return nil
+	}
+
 	if err := cr.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...); err != nil {
 		return err
 	}
@@ -352,6 +429,9 @@ func (cr *Timeline[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 	return nil
 }
 
+// RemoveItem drops the item from the index and the first- and last-page marks with it. The item
+// itself stays in Base. With a generation, an index of another generation is dropped whole
+// instead, and RemoveItem reports ErrNotIngested.
 func (cr *Timeline[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
 	return cr.removeItem(ctx, nil, item, keyParams...)
 }
@@ -361,10 +441,18 @@ func (cr *Timeline[T]) marker(ctx context.Context, suffix string, keyParams []st
 	if err != nil {
 		return false, err
 	}
+	if cr.sortedSetClient.generation != "" {
+		return cr.sortedSetClient.guardedMarker(ctx, key, keyParams)
+	}
 	return markerIsSet(ctx, cr.client, key)
 }
 
+// setMarker and clearMarker are seed writes: with a generation they go behind the stamp, so the
+// first of them in a seed drops an index of another generation.
 func (cr *Timeline[T]) setMarker(ctx context.Context, pipe redis.Pipeliner, suffix string, keyParams []string) error {
+	if cr.sortedSetClient.generation != "" {
+		return cr.sortedSetClient.stampMarker(ctx, pipe, cr.timeToLive, suffix, true, keyParams)
+	}
 	key, err := cr.sortedSetClient.markerKey(suffix, keyParams)
 	if err != nil {
 		return err
@@ -374,6 +462,9 @@ func (cr *Timeline[T]) setMarker(ctx context.Context, pipe redis.Pipeliner, suff
 }
 
 func (cr *Timeline[T]) clearMarker(ctx context.Context, pipe redis.Pipeliner, suffix string, keyParams []string) error {
+	if cr.sortedSetClient.generation != "" {
+		return cr.sortedSetClient.stampMarker(ctx, pipe, cr.timeToLive, suffix, false, keyParams)
+	}
 	key, err := cr.sortedSetClient.markerKey(suffix, keyParams)
 	if err != nil {
 		return err
@@ -431,12 +522,25 @@ func (cr *Timeline[T]) ReachedEnd(ctx context.Context, keyParams ...string) (boo
 
 	// The markers hang off the hash-tagged collection key, so all three reads land on
 	// one node even on a cluster.
-	pipe := cr.client.Pipeline()
-	count := pipe.ZCard(ctx, key)
-	lastPage := pipe.Get(ctx, key+markerLastPage)
-	blankPage := pipe.Get(ctx, key+markerBlankPage)
-	if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
-		return false, errPipe
+	var count *redis.IntCmd
+	var lastPage, blankPage *redis.StringCmd
+	if cr.sortedSetClient.generation != "" {
+		if _, errGuard := cr.sortedSetClient.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			count = pipe.ZCard(ctx, key)
+			lastPage = pipe.Get(ctx, key+markerLastPage)
+			blankPage = pipe.Get(ctx, key+markerBlankPage)
+			return nil
+		}); errGuard != nil {
+			return false, errGuard
+		}
+	} else {
+		pipe := cr.client.Pipeline()
+		count = pipe.ZCard(ctx, key)
+		lastPage = pipe.Get(ctx, key+markerLastPage)
+		blankPage = pipe.Get(ctx, key+markerBlankPage)
+		if _, errPipe := pipe.Exec(ctx); errPipe != nil && !errors.Is(errPipe, redis.Nil) {
+			return false, errPipe
+		}
 	}
 
 	members, errCount := count.Result()
@@ -500,26 +604,15 @@ func (cr *Timeline[T]) FetchAll() *timelineFetchBuilder[T] {
 	}
 }
 
-// Purge invalidates the collection: the sorted set and all three state markers are
-// dropped so the next fetch seeds it again from the database. Item keys are left alone.
+// Purge invalidates the collection: the sorted set, all three state markers and the
+// generation marker are dropped so the next fetch seeds it again from the database. Item keys
+// are left alone.
 func (cr *Timeline[T]) Purge(ctx context.Context, keyParams ...string) error {
-	pipe := cr.client.Pipeline()
-
-	if err := cr.sortedSetClient.Delete(ctx, pipe, keyParams...); err != nil {
+	keys, err := cr.sortedSetClient.generationKeys(keyParams)
+	if err != nil {
 		return err
 	}
-	if err := cr.UnmarkFirstPage(ctx, pipe, keyParams...); err != nil {
-		return err
-	}
-	if err := cr.UnmarkLastPage(ctx, pipe, keyParams...); err != nil {
-		return err
-	}
-	if err := cr.HasData(ctx, pipe, keyParams...); err != nil {
-		return err
-	}
-
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
+	return cr.client.Del(ctx, keys...).Err()
 }
 
 type timelineFetchBuilder[T Blueprint] struct {
@@ -567,11 +660,7 @@ func (b *timelineFetchBuilder[T]) cursorPage(ctx context.Context, key string, li
 			continue
 		}
 
-		result, err := timelineCursorScript.Eval(
-			ctx, b.timeline.client,
-			[]string{key},
-			candidate, limit, b.timeline.direction,
-		).StringSlice()
+		result, err := b.evalRead(ctx, timelineCursorScript, key, candidate, limit, b.timeline.direction)
 
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
@@ -606,16 +695,30 @@ func (b *timelineFetchBuilder[T]) positionPage(ctx context.Context, key string, 
 		return nil, nil, fmt.Errorf("%w: the score is not a number", ErrInvalidCursor)
 	}
 
-	result, err := timelinePositionScript.Eval(
-		ctx, b.timeline.client,
-		[]string{key},
-		formatScore(b.position.Score), b.position.Member, limit, b.timeline.direction,
-	).StringSlice()
+	result, err := b.evalRead(ctx, timelinePositionScript, key, formatScore(b.position.Score), b.position.Member, limit, b.timeline.direction)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return scoredMembers(result)
+}
+
+// evalRead runs one of the Timeline's read scripts on the sorted set key — behind the generation
+// check, in one MULTI/EXEC, when the timeline has a generation, so that an index of another
+// generation is dropped before it is read and reads as a cold one.
+func (b *timelineFetchBuilder[T]) evalRead(ctx context.Context, script *redis.Script, key string, args ...interface{}) ([]string, error) {
+	set := b.timeline.sortedSetClient
+	if set.generation == "" {
+		return script.Eval(ctx, b.timeline.client, []string{key}, args...).StringSlice()
+	}
+	var result *redis.Cmd
+	if _, err := set.guarded(ctx, b.params, func(pipe redis.Pipeliner) error {
+		result = script.Eval(ctx, pipe, []string{key}, args...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return result.StringSlice()
 }
 
 func (b *timelineFetchBuilder[T]) Exec(ctx context.Context) *FetchOutput[T] {

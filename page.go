@@ -83,6 +83,19 @@ func (p *Page[T]) SetSelfHeal(selfHeal bool) {
 	p.sorted.SetSelfHeal(selfHeal)
 }
 
+// SetGeneration stamps the index of every page with a generation, as Sorted.SetGeneration does:
+// a page whose marker holds another generation, or none, is dropped by the first operation that
+// finds it and seeded again. The page index — which pages exist, read by Purge — carries no
+// generation: Purge drops every page it lists, whichever generation seeded it.
+func (p *Page[T]) SetGeneration(generation string) error {
+	return p.sorted.SetGeneration(generation)
+}
+
+// Generation is the index generation SetGeneration set, "" for none.
+func (p *Page[T]) Generation() string {
+	return p.sorted.Generation()
+}
+
 func (p *Page[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, page int64, keyParams ...string) error {
 	return p.sorted.SetExpiration(ctx, pipe, p.pageParams(page, keyParams)...)
 }

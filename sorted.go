@@ -134,7 +134,42 @@ func (srtd *Sorted[T]) SetSelfHeal(selfHeal bool) {
 	srtd.sortedSetClient.SetSelfHeal(selfHeal)
 }
 
+// SetGeneration stamps the index with a generation: an index whose {K}:gen marker holds another
+// generation, or none, is treated as not there. Every operation that finds one drops the sorted
+// set and its markers before it does its own work, in the same command, so:
+//
+//   - RequiresSeeding reports true, IsEmpty false, Count 0, and a fetch returns nothing;
+//   - AddItem and RemoveItem report ErrNotIngested (the dropped index is seeded again on the
+//     next read, this change included);
+//   - a seed — IngestItem with seed = true, MarkEmpty, HasData, SetExpiration — starts from an
+//     empty index and stamps the marker, with the index TTL.
+//
+// Use a generation that changes whenever the rule that decides the members or their scores may
+// have changed — a build's commit is the safe choice — so that two builds sharing one Redis never
+// serve each other's index: each one reseeds what the other seeded, and a write by either one
+// removes the other's index rather than leaving it stale. "" turns it off again. The generation
+// must be at most 128 bytes without control characters. Set it before the index is used.
+//
+// Run each seed in one MULTI/EXEC (a TxPipeline): its first write drops another generation's
+// index, so a seed whose writes were interleaved with another generation's could otherwise end
+// up holding members of both.
+func (srtd *Sorted[T]) SetGeneration(generation string) error {
+	if err := validateGeneration(generation); err != nil {
+		return err
+	}
+	srtd.sortedSetClient.generation = generation
+	return nil
+}
+
+// Generation is the index generation SetGeneration set, "" for none.
+func (srtd *Sorted[T]) Generation() string {
+	return srtd.sortedSetClient.generation
+}
+
 func (srtd *Sorted[T]) SetExpiration(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	if srtd.sortedSetClient.generation != "" {
+		return srtd.sortedSetClient.stamp(ctx, pipe, srtd.timeToLive, "expire", nil, nil, keyParams)
+	}
 	return srtd.sortedSetClient.SetExpiration(ctx, pipe, srtd.timeToLive, keyParams...)
 }
 
@@ -220,11 +255,27 @@ func (srtd *Sorted[T]) ingest(ctx context.Context, pipe redis.Pipeliner, item T,
 		return nil, err
 	}
 
+	generation := srtd.sortedSetClient.generation
+
 	if seed {
+		if generation != "" {
+			if errStamp := srtd.sortedSetClient.stamp(ctx, pipe, srtd.timeToLive, "zadd", formatScore(score), item.GetRandId(), keyParams); errStamp != nil {
+				return nil, errStamp
+			}
+			return nil, nil
+		}
 		if errSet := srtd.sortedSetClient.SetItem(ctx, pipe, score, item, keyParams...); errSet != nil {
 			return nil, errSet
 		}
 		return nil, nil
+	}
+
+	if generation != "" {
+		keys, errKeys := srtd.sortedSetClient.generationKeys(keyParams)
+		if errKeys != nil {
+			return nil, errKeys
+		}
+		return generationSortedIngestScript.Eval(ctx, pipe, keys, formatScore(score), item.GetRandId(), generation), nil
 	}
 
 	key, errKey := srtd.sortedSetClient.key(keyParams)
@@ -248,18 +299,37 @@ func (srtd *Sorted[T]) removeItem(ctx context.Context, pipe redis.Pipeliner, ite
 
 	// Only the index is touched. The item stays in Base, because it may well be a member
 	// of other collections; deleting the entity itself is Base.Del's job.
-	if err := srtd.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...); err != nil {
+	var removed *redis.Cmd
+	if srtd.sortedSetClient.generation != "" {
+		cmd, err := srtd.sortedSetClient.removeMembers(ctx, pipe, false, []interface{}{item.GetRandId()}, keyParams)
+		if err != nil {
+			return err
+		}
+		removed = cmd
+	} else if err := srtd.sortedSetClient.RemoveItem(ctx, pipe, item, keyParams...); err != nil {
 		return err
 	}
 
 	if selfPipe {
-		_, errPipe := pipe.Exec(ctx)
-		return errPipe
+		if _, errPipe := pipe.Exec(ctx); errPipe != nil {
+			return errPipe
+		}
+		if removed != nil {
+			// The index was another generation's and has been dropped rather than changed.
+			if own, err := removed.Int64(); err != nil {
+				return err
+			} else if own == 0 {
+				return ErrNotIngested
+			}
+		}
 	}
 
 	return nil
 }
 
+// RemoveItem drops the item from the index. The item itself stays in Base. With a generation,
+// an index of another generation is dropped whole instead, and RemoveItem reports
+// ErrNotIngested.
 func (srtd *Sorted[T]) RemoveItem(ctx context.Context, item T, keyParams ...string) error {
 	return srtd.removeItem(ctx, nil, item, keyParams...)
 }
@@ -272,6 +342,10 @@ func (srtd *Sorted[T]) Fetch(direction string) *sortedFetchBuilder[T] {
 }
 
 func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	if srtd.sortedSetClient.generation != "" {
+		return srtd.sortedSetClient.stampMarker(ctx, pipe, srtd.timeToLive, markerBlankPage, true, keyParams)
+	}
+
 	key, err := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
 	if err != nil {
 		return err
@@ -282,6 +356,10 @@ func (srtd *Sorted[T]) MarkEmpty(ctx context.Context, pipe redis.Pipeliner, keyP
 }
 
 func (srtd *Sorted[T]) HasData(ctx context.Context, pipe redis.Pipeliner, keyParams ...string) error {
+	if srtd.sortedSetClient.generation != "" {
+		return srtd.sortedSetClient.stampMarker(ctx, pipe, srtd.timeToLive, markerBlankPage, false, keyParams)
+	}
+
 	key, err := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
 	if err != nil {
 		return err
@@ -295,6 +373,10 @@ func (srtd *Sorted[T]) IsEmpty(ctx context.Context, keyParams ...string) (bool, 
 	key, errKey := srtd.sortedSetClient.markerKey(markerBlankPage, keyParams)
 	if errKey != nil {
 		return false, errKey
+	}
+
+	if srtd.sortedSetClient.generation != "" {
+		return srtd.sortedSetClient.guardedMarker(ctx, key, keyParams)
 	}
 
 	return markerIsSet(ctx, srtd.client, key)
@@ -312,6 +394,34 @@ func markerIsSet(ctx context.Context, client redis.UniversalClient, key string) 
 }
 
 func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string) (bool, error) {
+	if srtd.sortedSetClient.generation != "" {
+		// One MULTI/EXEC: an index of another generation is dropped by the check, and the
+		// marker and the count read after it then say it needs seeding.
+		key, err := srtd.sortedSetClient.key(keyParams)
+		if err != nil {
+			return false, err
+		}
+		var blank *redis.StringCmd
+		var count *redis.IntCmd
+		if _, err := srtd.sortedSetClient.guarded(ctx, keyParams, func(pipe redis.Pipeliner) error {
+			blank = pipe.Get(ctx, key+markerBlankPage)
+			count = pipe.ZCard(ctx, key)
+			return nil
+		}); err != nil {
+			return false, err
+		}
+		if value, errBlank := blank.Result(); errBlank == nil && value == "1" {
+			return false, nil
+		} else if errBlank != nil && !errors.Is(errBlank, redis.Nil) {
+			return false, errBlank
+		}
+		members, errCount := count.Result()
+		if errCount != nil {
+			return false, errCount
+		}
+		return members == 0, nil
+	}
+
 	isBlankPage, err := srtd.IsEmpty(ctx, keyParams...)
 	if err != nil {
 		return false, err
@@ -328,23 +438,18 @@ func (srtd *Sorted[T]) RequiresSeeding(ctx context.Context, keyParams ...string)
 	return count == 0, nil
 }
 
-// Purge invalidates the collection: the sorted set and its state marker are dropped so
-// the next fetch seeds it again from the database. Item keys are left alone.
+// Purge invalidates the collection: the sorted set, its state marker and its generation
+// marker are dropped so the next fetch seeds it again from the database. Item keys are left
+// alone.
 func (srtd *Sorted[T]) Purge(ctx context.Context, keyParams ...string) error {
-	pipe := srtd.client.Pipeline()
-
-	if err := srtd.sortedSetClient.Delete(ctx, pipe, keyParams...); err != nil {
+	// Without the blank-page marker gone the collection stays flagged as confirmed-empty and
+	// RequiresSeeding keeps returning false, so a purge would silently kill it instead of
+	// rebuilding it.
+	keys, err := srtd.sortedSetClient.generationKeys(keyParams)
+	if err != nil {
 		return err
 	}
-
-	// Without this the collection stays flagged as confirmed-empty and RequiresSeeding
-	// keeps returning false, so a purge would silently kill it instead of rebuilding it.
-	if err := srtd.HasData(ctx, pipe, keyParams...); err != nil {
-		return err
-	}
-
-	_, errPipe := pipe.Exec(ctx)
-	return errPipe
+	return srtd.client.Del(ctx, keys...).Err()
 }
 
 type sortedFetchBuilder[T Blueprint] struct {

@@ -24,14 +24,18 @@ import "github.com/redis/go-redis/v9"
 //	ARGV[1] score        ARGV[2] member
 //
 // Returns 1 if the item entered the index, 0 if the collection is not seeded yet.
-var sortedIngestScript = redis.NewScript(`
+var sortedIngestScript = redis.NewScript(sortedIngestBody)
+
+// sortedIngestBody is the script of sortedIngestScript; generationSortedIngestScript runs it
+// behind the generation guard, with the generation marker and the generation appended.
+const sortedIngestBody = `
 redis.call('DEL', KEYS[2])
 if redis.call('ZCARD', KEYS[1]) > 0 then
   redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
   return 1
 end
 return 0
-`)
+`
 
 // timelineIngestScript places an item into a Timeline index, honouring the window the
 // index currently holds.
@@ -54,7 +58,11 @@ return 0
 // :blankpage marker is dropped so the next read seeds it, this item included.
 //
 // Returns 1 if the item entered the index, 0 otherwise.
-var timelineIngestScript = redis.NewScript(`
+var timelineIngestScript = redis.NewScript(timelineIngestBody)
+
+// timelineIngestBody is the script of timelineIngestScript; generationTimelineIngestScript runs it
+// behind the generation guard, with the generation marker and the generation appended.
+const timelineIngestBody = `
 local score = tonumber(ARGV[1])
 local member = ARGV[2]
 local perPage = tonumber(ARGV[3])
@@ -103,7 +111,7 @@ if count == perPage and redis.call('EXISTS', KEYS[2]) == 1 then
 end
 redis.call('ZADD', KEYS[1], score, member)
 return 1
-`)
+`
 
 // timelineCursorScript reads one page of a Timeline positioned after a cursor member.
 //

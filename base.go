@@ -18,6 +18,10 @@ type Base[T Blueprint] struct {
 	relations     []Relation[T]
 	relationDepth int
 	touchOnRead   bool
+	// generation is what SetGeneration set ("" for none); prefix is what it puts in front
+	// of every value.
+	generation string
+	prefix     string
 }
 
 type BaseWithPipeline[T Blueprint] struct {
@@ -104,6 +108,58 @@ func (cr *Base[T]) SetTouchOnRead(touch bool) {
 	cr.touchOnRead = touch
 }
 
+// SetGeneration makes the Base write every value with the generation in front of it and read
+// only values that carry it. A value without it — written before the Base had a generation, or
+// by a Base of another generation — reads as a key that does not exist: Get returns ErrNotFound,
+// GetMany leaves it out, an index counts its member as dangling and a relation leaves its field
+// nil. SetIfAbsent overwrites it, Exists reports false. "" turns generations off again.
+//
+// Change the generation whenever what the Base stores changes in a way a reader must not
+// confuse with what it stored before — a field added, removed or retyped, a different meaning
+// for the same field — so that two builds sharing one Redis, as during a rolling deploy, never
+// read each other's values and each reloads what the other wrote. A generation derived from the
+// stored shape keeps the cache warm across every build that does not change it.
+//
+// The generation must be at most 128 bytes without control characters. Set it before the Base
+// is used.
+func (cr *Base[T]) SetGeneration(generation string) error {
+	if err := validateGeneration(generation); err != nil {
+		return err
+	}
+	cr.generation = generation
+	cr.prefix = generationPrefix(generation)
+	return nil
+}
+
+// Generation is the generation SetGeneration set, "" for none.
+func (cr *Base[T]) Generation() string {
+	return cr.generation
+}
+
+// encodeValue is the value Base stores for item: its encoding, behind the generation prefix.
+func (cr *Base[T]) encodeValue(item T) (string, error) {
+	encoded, err := encodeItem(item)
+	if err != nil {
+		return "", err
+	}
+	return cr.prefix + string(encoded), nil
+}
+
+// decodeValue reads a stored value back. It reports false, with no error, for a value of
+// another generation: as far as this Base is concerned the key does not exist.
+func (cr *Base[T]) decodeValue(stored string) (T, bool, error) {
+	var nilItem T
+	payload, own := ownValue(stored, cr.prefix)
+	if !own {
+		return nilItem, false, nil
+	}
+	item, err := decodeItem[T]([]byte(payload))
+	if err != nil {
+		return nilItem, false, err
+	}
+	return item, true, nil
+}
+
 func (cr *Base[T]) TimeToLive() time.Duration {
 	return cr.timeToLive
 }
@@ -136,9 +192,12 @@ func (cr *Base[T]) Get(ctx context.Context, keyParams ...string) (T, error) {
 		return nilItem, result.Err()
 	}
 
-	fetchedItem, errUnmarshal := decodeItem[T]([]byte(result.Val()))
+	fetchedItem, own, errUnmarshal := cr.decodeValue(result.Val())
 	if errUnmarshal != nil {
 		return nilItem, errUnmarshal
+	}
+	if !own {
+		return nilItem, ErrNotFound
 	}
 
 	if err := resolveRelations(ctx, cr.client, cr.relations, []T{fetchedItem}, cr.relationDepth); err != nil {
@@ -229,9 +288,12 @@ func (cr *Base[T]) stageGetMany(ctx context.Context, pipe redis.Pipeliner, randI
 				return nil, err
 			}
 
-			fetchedItem, errUnmarshal := decodeItem[T]([]byte(value))
+			fetchedItem, own, errUnmarshal := cr.decodeValue(value)
 			if errUnmarshal != nil {
 				return nil, errUnmarshal
+			}
+			if !own {
+				continue // another generation's value: not there, for this Base
 			}
 
 			items[randId] = fetchedItem
@@ -260,12 +322,10 @@ func (cr *Base[T]) set(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 		return errKey
 	}
 
-	itemInByte, errorMarshalJson := encodeItem(item)
+	valueAsString, errorMarshalJson := cr.encodeValue(item)
 	if errorMarshalJson != nil {
 		return errorMarshalJson
 	}
-
-	valueAsString := string(itemInByte)
 
 	if pipe != nil {
 		pipe.Set(ctx, key, valueAsString, cr.timeToLive)
@@ -295,12 +355,24 @@ func (cr *Base[T]) setIfAbsent(ctx context.Context, pipe redis.Pipeliner, item T
 		return errKey
 	}
 
-	itemInByte, errorMarshalJson := encodeItem(item)
+	valueAsString, errorMarshalJson := cr.encodeValue(item)
 	if errorMarshalJson != nil {
 		return errorMarshalJson
 	}
 
-	valueAsString := string(itemInByte)
+	if cr.generation != "" {
+		// A value of another generation is not "present" for this Base: it is replaced, in
+		// the same command as the check, rather than left for the index to point at.
+		var cmd redis.Scripter = cr.client
+		if pipe != nil {
+			cmd = pipe
+		}
+		result := baseSetIfAbsentScript.Eval(ctx, cmd, []string{key}, valueAsString, cr.prefix, ttlMillis(cr.timeToLive))
+		if pipe == nil && result.Err() != nil {
+			return result.Err()
+		}
+		return cr.unmarkMissing(ctx, pipe, params...)
+	}
 
 	if pipe != nil {
 		pipe.SetNX(ctx, key, valueAsString, cr.timeToLive)
@@ -417,11 +489,20 @@ func (cr *Base[T]) unmarkMissing(ctx context.Context, pipe redis.Pipeliner, keyP
 	return cr.client.Del(ctx, key).Err()
 }
 
-// Exists reports whether the item key is present in Base.
+// Exists reports whether the item key is present in Base — with a generation, whether it holds a
+// value of this generation.
 func (cr *Base[T]) Exists(ctx context.Context, keyParams ...string) (bool, error) {
 	key, errKey := cr.itemKey(keyParams)
 	if errKey != nil {
 		return false, errKey
+	}
+
+	if cr.generation != "" {
+		own, err := baseOwnsScript.Eval(ctx, cr.client, []string{key}, cr.prefix).Int64()
+		if err != nil {
+			return false, err
+		}
+		return own == 1, nil
 	}
 
 	count, err := cr.client.Exists(ctx, key).Result()
@@ -431,3 +512,38 @@ func (cr *Base[T]) Exists(ctx context.Context, keyParams ...string) (bool, error
 
 	return count > 0, nil
 }
+
+// baseSetIfAbsentScript is SetIfAbsent for a Base with a generation: a value of this generation is
+// kept and its TTL refreshed; anything else — no value, or one of another generation — is
+// replaced.
+//
+//	KEYS[1] item   ARGV[1] value   ARGV[2] generation prefix   ARGV[3] TTL in ms (0: none)
+//
+// Returns 1 if it wrote the value, 0 if it kept the one there.
+var baseSetIfAbsentScript = redis.NewScript(`
+local held = redis.call('GET', KEYS[1])
+local ttl = tonumber(ARGV[3])
+if held and string.sub(held, 1, #ARGV[2]) == ARGV[2] then
+  if ttl > 0 then
+    redis.call('PEXPIRE', KEYS[1], ttl)
+  end
+  return 0
+end
+if ttl > 0 then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ttl)
+else
+  redis.call('SET', KEYS[1], ARGV[1])
+end
+return 1
+`)
+
+// baseOwnsScript reports whether an item key holds a value of a generation.
+//
+//	KEYS[1] item   ARGV[1] generation prefix
+var baseOwnsScript = redis.NewScript(`
+local held = redis.call('GET', KEYS[1])
+if held and string.sub(held, 1, #ARGV[1]) == ARGV[1] then
+  return 1
+end
+return 0
+`)
