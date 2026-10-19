@@ -366,18 +366,24 @@ write plain SQL, scan the rows, and feed the results in through redifu's public 
 Every seeding function has the same four steps:
 
 1. build and run your query;
-2. for each row: `Base.WithPipeline(pipe).Set` then `IngestItem(..., seed=true, ...)`;
+2. for each row: `Base.WithPipeline(pipe).Set` then `IngestItem(..., seed=true, ...)` (a
+   Timeline top-up: `Extend` with all the rows);
 3. set the state markers the collection needs;
 4. `pipe.Exec(ctx)` — once, at the end.
 
-Everything before step 4 only enqueues, so a whole page of seeding costs one round trip.
+Everything before step 4 only enqueues, so a whole page of seeding costs one round trip. Seed
+through `redisClient.TxPipeline()`, as the examples do: Redis then applies the seed whole, so a
+reader never sees an index half filled, and once an index has a generation (see Generations)
+its first write cannot interleave with another generation's seed.
 
 ### Timeline
 
 A Timeline is never seeded in one go. It holds a **prefix** of the table — the head, then
 whatever scrolling has asked for since — and is extended from its last member whenever a
 page runs past it. So there is one seeder, and the head seed of a cold index and every
-top-up are the same query with a different anchor:
+top-up are the same query with a different anchor. The head seed starts the index
+(`IngestItem` with seed = true and the markers); a top-up is an `Extend`, which applies only
+if the index still ends where the top-up started:
 
 ```go
 // seedPostFeed loads up to limit posts that follow `after` in the feed's order — the
@@ -410,37 +416,47 @@ func seedPostFeed(ctx context.Context, userRandId string, after redifu.Cursor, l
     }
     defer rows.Close()
 
-    pipe := redisClient.Pipeline()
-    if after.IsZero() {
-        // A head seed starts the index over. A :lastpage marker can outlive the index
-        // it described (the index TTL is set here, the marker's later); left in place
-        // it would end the feed at this head.
-        PostTimeline.UnmarkLastPage(ctx, pipe, userRandId)
-    }
-
-    var count int64
+    pipe := redisClient.TxPipeline()
+    var items []*Post
     for rows.Next() {
         item, err := scanPostRows(rows)
         if err != nil {
             return err
         }
         PostBase.WithPipeline(pipe).Set(ctx, item)
-        PostTimeline.IngestItem(ctx, pipe, item, true, userRandId)
-        count++
+        items = append(items, item)
     }
     if err = rows.Err(); err != nil {
         return err
     }
+    count := int64(len(items))
 
+    if !after.IsZero() {
+        // A top-up. Extend checks, in the same script, that the index still ends at `after`:
+        // if it was purged, reseeded or dropped since Tail was read, it writes nothing (the
+        // handler reads again and seeds what it still needs) instead of leaving rows from the
+        // middle of the table in an index without its head. With fewer rows than asked for
+        // it marks the end of the table; it renews the index TTL either way.
+        if _, err := PostTimeline.Extend(ctx, pipe, after, items, count < limit, userRandId); err != nil {
+            return err
+        }
+        _, err = pipe.Exec(ctx)
+        return err
+    }
+
+    // A head seed starts the index over. A :lastpage marker can outlive the index it
+    // described (an evicted index); left in place it would end the feed at this head.
+    PostTimeline.UnmarkLastPage(ctx, pipe, userRandId)
+    for _, item := range items {
+        PostTimeline.IngestItem(ctx, pipe, item, true, userRandId)
+    }
     switch {
-    case after.IsZero() && count == 0:
+    case count == 0:
         PostTimeline.MarkEmpty(ctx, pipe, userRandId)    // nothing in the table for this feed
     case count < limit:
         PostTimeline.MarkLastPage(ctx, pipe, userRandId) // the index now reaches the end of the table
     }
-    if after.IsZero() {
-        PostTimeline.SetExpiration(ctx, pipe, userRandId)
-    }
+    PostTimeline.SetExpiration(ctx, pipe, userRandId)
 
     _, err = pipe.Exec(ctx)
     return err
@@ -518,7 +534,8 @@ func GetPostFeed(ctx context.Context, userRandId string, token string) (*FeedPag
 What each step guarantees:
 
 - **The index is always a prefix of the table.** It is seeded from the head and only ever
-  extended from its tail, so a walk never skips a row. A seed anchored on the client's cursor
+  extended from its tail — `Extend` refuses a tail the index no longer ends at — so a walk never
+  skips a row. A seed anchored on the client's cursor
   could: after a purge or an expiry the index restarts at the head, and rows between its tail
   and the cursor would never be loaded.
 - **The first walk loads each row once; every walk after it costs no query.** A 50-row table
@@ -613,7 +630,7 @@ func seedLeaderboard(ctx context.Context, seasonRandId string) error {
     }
     defer rows.Close()
 
-    pipe := redisClient.Pipeline()
+    pipe := redisClient.TxPipeline()
     var count int64
 
     for rows.Next() {
@@ -639,20 +656,28 @@ func seedLeaderboard(ctx context.Context, seasonRandId string) error {
 }
 
 func GetLeaderboard(ctx context.Context, seasonRandId string) ([]*Score, error) {
-    needsSeed, err := ScoreSorted.RequiresSeeding(ctx, seasonRandId)
-    if err != nil {
-        return nil, err
-    }
-    if needsSeed {
-        if err := seedLeaderboard(ctx, seasonRandId); err != nil {
+    for attempt := 0; ; attempt++ {
+        needsSeed, err := ScoreSorted.RequiresSeeding(ctx, seasonRandId)
+        if err != nil {
             return nil, err
         }
-    }
+        if needsSeed {
+            if err := seedLeaderboard(ctx, seasonRandId); err != nil {
+                return nil, err
+            }
+        }
 
-    // Direction is supplied here, not at construction. Returns the full collection.
-    return ScoreSorted.Fetch(redifu.Descending).
-        WithParams(seasonRandId).
-        Exec(ctx)
+        // Direction is supplied here, not at construction. Returns the full collection.
+        items, err := ScoreSorted.Fetch(redifu.Descending).
+            WithParams(seasonRandId).
+            Exec(ctx)
+        // Only with a generation: the index stopped being this generation's between the
+        // check and the read (another build touched it). Seed it again, once.
+        if errors.Is(err, redifu.ErrNotSeeded) && attempt == 0 {
+            continue
+        }
+        return items, err
+    }
 }
 ```
 
@@ -750,7 +775,7 @@ func seedCommentPage(ctx context.Context, postRandId string, page int64) error {
     }
     defer rows.Close()
 
-    pipe := redisClient.Pipeline()
+    pipe := redisClient.TxPipeline()
     var count int64
 
     for rows.Next() {
@@ -854,7 +879,7 @@ func seedTransactions(ctx context.Context, accountRandId string, from, to time.T
             return err
         }
 
-        pipe := redisClient.Pipeline()
+        pipe := redisClient.TxPipeline()
 
         for rows.Next() {
             item, err := scanTxRows(rows)
@@ -1004,7 +1029,7 @@ if err != nil {
 }
 defer rows.Close()
 
-pipe := redisClient.Pipeline()
+pipe := redisClient.TxPipeline()
 seenAuthor := map[string]bool{}
 
 for rows.Next() {
@@ -1107,22 +1132,32 @@ postTimeline.SetGeneration(buildCommit)
 ```
 
 - A value without the Base's generation — written before it, or by a build of another shape —
-  reads as a missing key: `Get` returns `ErrNotFound`, `GetMany` leaves it out, an index counts
-  its member as dangling, a relation stays nil. Your miss path reloads it from the database.
+  reads as a missing key: `Get` returns `ErrNotFound`, `GetMany` leaves it out, a relation stays
+  nil. Your miss path reloads it from the database. In an index such a member counts as
+  dangling (`ExecReport`, `Dangling()`) but stays: the item exists, so reseed the list when you
+  need it whole — the seed writes the item in this generation.
 - An index without the index's generation is not there: whatever touches it first drops it
-  (`{K}`, its markers, `{K}:gen`) and carries on with a cold index — a read seeds it, `AddItem` /
-  `RemoveItem` return `ErrNotIngested`, a seed starts empty and stamps it.
+  (`{K}`, its markers, `{K}:gen`, a TimeSeries' `{K}:segments`) and carries on with a cold
+  index — a Timeline read seeds it, a `Sorted` / `Page` read answers `redifu.ErrNotSeeded`
+  (seed and read again, as `GetLeaderboard` does), `AddItem` returns `ErrNotIngested`
+  (`RemoveItem` too, when there was an index to drop), a seed starts empty and stamps it.
 - Two builds of different generations can share one Redis, as they do while a deploy rolls:
   each serves only what it wrote, and a write by either one removes the other's index instead
   of leaving it stale. Expect each list both builds read to be reseeded during the overlap.
 - **Seed in one `MULTI/EXEC`** (`client.TxPipeline()`) once an index has a generation: the
   seed's first write drops another generation's index, and in a plain pipeline another
   generation's seed could interleave with yours.
+- **Top a Timeline up with `Extend`**, never `IngestItem(seed = true)`: between your `Tail` and
+  your top-up another generation may drop the index (or it may be purged and reseeded), and a
+  top-up written into what is left would serve rows from the middle of the table as page one
+  until the index expires. `Extend` checks the tail and the generation in the same script.
 - Generations are opt-in. Without `SetGeneration` nothing about the stored values or the keys
-  changes.
+  changes. Turn one on together with a new key name: a build without a generation still reading
+  the same key would write into a stamped index the generation build trusts.
+- `SetGeneration` may be called again while the Base or index is in use (a consumer that moves
+  to a new generation at run time); each command takes the generation current when it starts.
 
-A generation is at most 128 bytes without control characters; set it right after the
-constructor, before the Base or index is used.
+A generation is at most 128 bytes without control characters.
 
 ## Project conventions
 
@@ -1165,3 +1200,5 @@ constructor, before the Base or index is used.
 - Do not register a relation on an index when it belongs to the entity — `Base.AddRelation` makes it resolve everywhere, `index.AddRelation` only in that index
 - Do not put a version into a key format to invalidate what an older build stored — set a generation (`SetGeneration`) and keep the name
 - Do not seed an index that has a generation through a plain pipeline — use `TxPipeline`, so the seed's first write and the rest land together
+- Do not top a Timeline up with `IngestItem(seed = true)` — use `Extend`, which writes nothing into an index that no longer ends at the tail you read
+- Do not answer an empty list for `redifu.ErrNotSeeded` from a `Sorted` or `Page` read — seed and read again

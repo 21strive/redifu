@@ -112,6 +112,17 @@ func TestRealRedis(t *testing.T) {
 		"PageGeneration":                                   scenarioPageGeneration,
 		"TimeSeriesGeneration":                             scenarioTimeSeriesGeneration,
 		"WithoutGenerationNothingChanges":                  scenarioWithoutGenerationNothingChanges,
+		"TimeSeriesGenerationSegmentsGoWithTheIndex":       scenarioTimeSeriesGenerationSegmentsGoWithTheIndex,
+		"TimeSeriesGenerationAddItemAndRemove":             scenarioTimeSeriesGenerationAddItemAndRemove,
+		"GenerationSelfHealPastTheUnpackLimit":             scenarioGenerationSelfHealPastTheUnpackLimit,
+		"GenerationSelfHealKeepsAnotherGenerationsValues":  scenarioGenerationSelfHealKeepsAnotherGenerationsValues,
+		"GenerationSelfHealLeavesAForeignIndexAlone":       scenarioGenerationSelfHealLeavesAForeignIndexAlone,
+		"GenerationRemoveItemOnAColdIndex":                 scenarioGenerationRemoveItemOnAColdIndex,
+		"TimelineRequiresSeedingWithAGenerationWritesNone": scenarioTimelineRequiresSeedingWithAGenerationWritesNothing,
+		"SortedFetchAnswersErrNotSeededAfterADrop":         scenarioSortedFetchAnswersErrNotSeededAfterADrop,
+		"TimelineExtend":                                   scenarioTimelineExtend,
+		"BaseWithoutGenerationMissesAPrefixedValue":        scenarioBaseWithoutGenerationMissesAPrefixedValue,
+		"SetGenerationWhileInUse":                          scenarioSetGenerationWhileInUse,
 	}
 
 	for name, scenario := range scenarios {

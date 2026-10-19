@@ -450,26 +450,57 @@ An addition; nothing changes until you call it. `SetGeneration(generation string
 
 - A `Base` writes every value as `<generation>\x1f<encoded item>` and reads only values with
   that prefix; any other value is a missing key (`ErrNotFound`, absent from `GetMany`, dangling
-  in an index). `SetIfAbsent` replaces such a value, `Exists` reports false.
+  in an index). `SetIfAbsent` replaces such a value — with what it was given, so pass the full
+  item, not a stub — and `Exists` reports false. A Base *without* a generation that meets a
+  prefixed value reads it as missing too, instead of failing the whole `GetMany` on it.
 - An index is stamped with a `{K}:gen` marker, with the index TTL. An index whose marker is
   absent or another generation's is dropped — sorted set and every marker — by the first
-  operation that finds it, in the same command: reads see a cold index, `AddItem` and
-  `RemoveItem` return `ErrNotIngested`, a seed starts empty and stamps it. Run seeds in one
-  `MULTI/EXEC`.
-- A `TimeSeries` also keeps a `gen` field in its segment store; segments of another generation
-  read as gaps.
+  operation that finds it, in the same command: a Timeline read sees a cold index, a `Sorted`
+  or `Page` read answers `ErrNotSeeded` (new: seed and read again — an empty list would read as
+  one confirmed empty), `AddItem` returns `ErrNotIngested`, a seed starts empty and stamps it.
+  Run seeds in one `MULTI/EXEC`.
+- A `TimeSeries` with a generation keeps its segment store under the index's hash tag,
+  `{K}:segments` (`K:segments` without a generation), as one of the index's markers: whatever
+  drops the index drops the ranges it claimed, so they read as gaps. Every segment read is
+  behind the check, and `AddItem` decides coverage and writes in one script.
+- A read's self-heal removes only members whose item is gone. A member whose item holds another
+  generation's value counts as dangling (the read cannot serve it) but stays in the index —
+  reseed the list when you need it whole — and a heal never touches an index that has become
+  another generation's since it was read.
+- `SetGeneration` may be called while the Base or index is in use; each command takes the
+  generation current when it is issued.
+- A TTL of zero or less stores keys without an expiry on the generation path.
 
 To drop a version segment from your key formats: set a generation on every `Base` and index,
 remove the segment from the formats, and delete the old keys once the new build serves alone
 (they also expire on their own). Values written without a generation read as missing for a Base
 that has one, so nothing the old build wrote is ever read.
 
+**Do not turn a generation on for a key format that a build without one still reads.** That
+build ignores `{K}:gen` — its writes land in a stamped index, which the generation build then
+trusts — and before this release it could not read a prefixed value at all. The first
+generation on a key format comes with a new key name (dropping its version segment, as above),
+so the two builds never share a key.
+
 `Purge` now also deletes the `{K}:gen` marker. Without a generation there is none, so this
 changes nothing.
 
 `Timeline.RemoveItem` and `Sorted.RemoveItem` (and `Page.RemoveItem`) may now return
 `ErrNotIngested` — only with a generation, when the index was another generation's and was
-dropped instead.
+dropped instead. An index that is not there at all is no error, as without a generation.
+
+`Timeline.Extend(ctx, pipe, after, items, reachedEnd, keyParams...)` (new) is the top-up seed:
+it appends the rows that follow the index's tail `after` and marks the end of the data when
+`reachedEnd`, in one script that first checks the index still ends at `after` (and, with a
+generation, is still this generation's); otherwise it writes nothing (`Extension.Applied()`
+reports false after `Exec`) and the read that asked for it reads again. A top-up written with
+`IngestItem(seed = true)` could land on an index that was dropped, purged or reseeded since
+`Tail` was read and leave it without its head. Use `Extend` for every top-up; the head seed of
+a cold index stays `IngestItem(seed = true)` with the markers. `Extend` also renews the index
+TTL, so a top-up's `:lastpage` marker no longer outlives the index it describes.
+
+`Base.MarkAsMissing` / `IsMissing` (`<key>:blank`) carry no generation: "the database has no such
+row" does not depend on the build that looked.
 
 ---
 
@@ -489,4 +520,5 @@ dropped instead.
    position cursors (`FetchFrom`, `NextCursor`), which never send it back to page one.
 9. If you run Redis below 6.2, call `SetTouchOnRead(false)` on every `Base`.
 10. Optional: give every `Base` and index a generation (section 24) instead of versioning key
-    names, and seed through `TxPipeline` once you do.
+    names, seed through `TxPipeline` once you do, handle `ErrNotSeeded` from `Sorted` and `Page`
+    reads, and top a Timeline up with `Extend`.

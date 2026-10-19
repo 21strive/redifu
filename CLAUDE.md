@@ -238,29 +238,42 @@ data and puts the version into the stored state (`generation.go`):
 | | `SetGeneration` on | Stored as | Another generation's (or none) |
 |---|---|---|---|
 | Item | `Base` | the value, prefixed `<generation>\x1f` | a missing key: `ErrNotFound`, absent from `GetMany`, dangling in an index, a nil relation; `SetIfAbsent` replaces it, `Exists` is false |
-| Index | `Sorted`, `Timeline`, `Page`, `TimeSeries` | a marker `{K}:gen` next to the other markers, with the index TTL (a `TimeSeries` also keeps a `gen` field in its segment store) | the index is not there: the operation that finds it drops the sorted set and **all** its markers first, in the same command, then does its own work on the cold index |
+| Index | `Sorted`, `Timeline`, `Page`, `TimeSeries` | a marker `{K}:gen` next to the other markers, with the index TTL (a `TimeSeries` keeps its segment store under the same hash tag, `{K}:segments`, as one of the markers) | the index is not there: the operation that finds it drops the sorted set and **all** its markers first, in the same command, then does its own work on the cold index |
 
 How each kind of operation applies it, with a generation set:
 
 - **Reads** (`Fetch`/`FetchFrom`/`Exec`, `Count`, `IsEmpty`, `RequiresSeeding`, `ReachedEnd`,
-  `Tail`, the `Is…Page` markers) run `generationCheckScript` and then their own commands in one
-  `MULTI/EXEC` (`SortedSet.guarded`). After the check the index is this generation's or gone,
-  so a read never sees another generation's members or markers.
-- **Writes outside a seed** (`AddItem`, `RemoveItem`, self-heal) are scripts behind
+  `Tail`, the `Is…Page` markers, every TimeSeries segment read) run `generationCheckScript` and
+  then their own commands in one `MULTI/EXEC` (`SortedSet.guarded`). After the check the index
+  is this generation's or gone, so a read never sees another generation's members or markers.
+  A `Sorted`/`Page` member read of a dropped (or cold) index answers `ErrNotSeeded`, never an
+  empty list; a Timeline read sees a cold index, which its flow seeds; a TimeSeries reads a gap.
+- **Writes outside a seed** (`AddItem`, `RemoveItem`, a segment `Remove`) are scripts behind
   `generationGuard`: on a foreign index they drop it and report it (`ErrNotIngested` /
   0). Dropping is the only safe answer — another generation's members follow rules this
-  build does not know, and leaving its index unchanged would leave it stale.
+  build does not know, and leaving its index unchanged would leave it stale. A removal from an
+  index that is not there at all is no error (`removalGuard` answers -1).
+- **Self-heal** (`generationHealScript`) is the exception: it removes members only from an index
+  that is still this generation's, a thousand per `ZREM`, and never drops one — the index may
+  have become another generation's fresh seed since the read. Members whose item holds another
+  generation's value are dangling for the report but not removed: the item exists.
 - **Seed writes** (`IngestItem` with seed = true, `MarkEmpty`, `MarkLastPage`, `MarkFirstPage`,
   the `Unmark` methods, `HasData`, `SetExpiration`, `AddSegment`) go through
   `generationStampScript`: drop a foreign index, stamp the marker with the TTL, then write.
   The first write of a seed therefore starts from an empty index. A seed must run in one
   `MULTI/EXEC` for that to hold: interleaved with another generation's seed, a plain pipeline
   could end up holding a part of each.
+- **A Timeline top-up** is `Extend` (`timelineExtendScript`), not a seed write: it applies only
+  to this generation's index whose tail is still the cursor the rows follow, and writes nothing
+  otherwise. A stamp would start a dropped index over with rows from the middle of the data.
 - `Purge` drops the `:gen` marker with the rest, with or without a generation.
+- The generation lives in a `generationCell` (an atomic pointer): `SetGeneration` may run while
+  the collection is used, and an operation reads the generation once and passes it to every
+  command it issues.
 
 The generation scripts take the collection's keys in one order — the sorted set, its markers
-(`SortedSet.markers`: `:blankpage` for a `Sorted`; `:firstpage`, `:lastpage`, `:blankpage` for a
-`Timeline`), the generation marker last — and the generation as the last argument, so the
+(`SortedSet.markers`: `:blankpage` for a `Sorted`; `:blankpage`, `:segments` for a `TimeSeries`;
+`:firstpage`, `:lastpage`, `:blankpage` for a `Timeline`), the generation marker last — and the generation as the last argument, so the
 guard reads `KEYS[#KEYS]` / `ARGV[#ARGV]` and drops with `DEL unpack(KEYS)`. The ingest scripts
 with a generation are the scripts without one behind that guard (`sortedIngestBody`,
 `timelineIngestBody`), so the two can never drift apart.
@@ -375,6 +388,7 @@ saved. Consumer-facing guidance and a worked example live in `CLAUDE.consumer.md
 | `Base.WithPipeline(pipe).SetIfAbsent` | store it only if absent, but always refresh its TTL |
 | `Base.GetMany(ctx, randIds)` | read many items in one round-trip, relations resolved |
 | `IngestItem(ctx, pipe, item, seed, keyParams...)` | add to the index — pass `seed = true` while seeding |
+| `Timeline.Extend(ctx, pipe, after, items, reachedEnd, keyParams...)` | a top-up: append the rows after the tail, only if the index still ends there |
 | `SetExpiration(ctx, pipe, keyParams...)` | apply the collection TTL |
 | `RequiresSeeding(...)` | decide whether seeding is needed at all (`Sorted`, `Page`; deprecated on `Timeline`) |
 | `MarkEmpty` / `MarkLastPage` / `UnmarkLastPage` | Timeline state markers (see above) |
@@ -387,9 +401,10 @@ These are the only supported entry points for writing into a collection out of b
 them take a caller-owned pipeline and must not execute it — see Pipeline Discipline.
 
 A Timeline is seeded by **top-up**: `FetchFrom(cursor)`; while the page has no `HasMore()`
-and the index has not `ReachedEnd`, seed `itemPerPage + 1 - len(items)` rows that follow
-`Tail` and fetch again. The head seed of a cold index is the same call with the zero
-`Cursor` as anchor. The consumer's keyset must compare exactly what the index sorts by — the
+and the index has not `ReachedEnd`, load `itemPerPage + 1 - len(items)` rows that follow
+`Tail`, `Extend` the index with them and fetch again. The head seed of a cold index is the
+same query with the zero `Cursor` as anchor, written with `IngestItem(seed = true)` and the
+markers. The consumer's keyset must compare exactly what the index sorts by — the
 score (`Timeline.Score`; milliseconds for a time field) and the member in byte order — and
 `TestDocumentedTimelineFlow*` (`topup_flow_test.go`) drives the documented handler and
 seeder against tables of 0 to 200 rows. It replaces the `subtraction` parameter of the

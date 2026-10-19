@@ -18,10 +18,9 @@ type Base[T Blueprint] struct {
 	relations     []Relation[T]
 	relationDepth int
 	touchOnRead   bool
-	// generation is what SetGeneration set ("" for none); prefix is what it puts in front
-	// of every value.
-	generation string
-	prefix     string
+	// gen is what SetGeneration set: the generation and the prefix it puts in front of every
+	// value (both "" for none).
+	gen generationCell
 }
 
 type BaseWithPipeline[T Blueprint] struct {
@@ -120,36 +119,31 @@ func (cr *Base[T]) SetTouchOnRead(touch bool) {
 // read each other's values and each reloads what the other wrote. A generation derived from the
 // stored shape keeps the cache warm across every build that does not change it.
 //
-// The generation must be at most 128 bytes without control characters. Set it before the Base
-// is used.
+// The generation must be at most 128 bytes without control characters. It may be changed while
+// the Base is in use: every read and write takes the generation current when it starts.
 func (cr *Base[T]) SetGeneration(generation string) error {
-	if err := validateGeneration(generation); err != nil {
-		return err
-	}
-	cr.generation = generation
-	cr.prefix = generationPrefix(generation)
-	return nil
+	return cr.gen.set(generation)
 }
 
 // Generation is the generation SetGeneration set, "" for none.
 func (cr *Base[T]) Generation() string {
-	return cr.generation
+	return cr.gen.load().generation
 }
 
 // encodeValue is the value Base stores for item: its encoding, behind the generation prefix.
-func (cr *Base[T]) encodeValue(item T) (string, error) {
+func encodeValue[T Blueprint](item T, gen *generationValue) (string, error) {
 	encoded, err := encodeItem(item)
 	if err != nil {
 		return "", err
 	}
-	return cr.prefix + string(encoded), nil
+	return gen.prefix + string(encoded), nil
 }
 
 // decodeValue reads a stored value back. It reports false, with no error, for a value of
 // another generation: as far as this Base is concerned the key does not exist.
-func (cr *Base[T]) decodeValue(stored string) (T, bool, error) {
+func decodeValue[T Blueprint](stored string, gen *generationValue) (T, bool, error) {
 	var nilItem T
-	payload, own := ownValue(stored, cr.prefix)
+	payload, own := ownValue(stored, gen.prefix)
 	if !own {
 		return nilItem, false, nil
 	}
@@ -177,6 +171,7 @@ func (cr *Base[T]) Get(ctx context.Context, keyParams ...string) (T, error) {
 	if errKey != nil {
 		return nilItem, errKey
 	}
+	gen := cr.gen.load()
 
 	var result *redis.StringCmd
 	if cr.touchOnRead && cr.timeToLive > 0 {
@@ -192,7 +187,7 @@ func (cr *Base[T]) Get(ctx context.Context, keyParams ...string) (T, error) {
 		return nilItem, result.Err()
 	}
 
-	fetchedItem, own, errUnmarshal := cr.decodeValue(result.Val())
+	fetchedItem, own, errUnmarshal := decodeValue[T](result.Val(), gen)
 	if errUnmarshal != nil {
 		return nilItem, errUnmarshal
 	}
@@ -234,15 +229,22 @@ func (cr *Base[T]) GetMany(ctx context.Context, randIds []string) (map[string]T,
 // entity's own relations and the index's extra relations are resolved together, in
 // one pass, instead of the batch being walked twice.
 func (cr *Base[T]) getManyRaw(ctx context.Context, randIds []string) (map[string]T, error) {
+	items, _, err := cr.getManyReport(ctx, randIds)
+	return items, err
+}
+
+// getManyReport is getManyRaw that also names the randIds whose key holds a value of another
+// generation: the item exists, this Base just cannot read it, so an index must not drop its member.
+func (cr *Base[T]) getManyReport(ctx context.Context, randIds []string) (map[string]T, map[string]bool, error) {
 	if len(randIds) == 0 {
-		return map[string]T{}, nil
+		return map[string]T{}, nil, nil
 	}
 
 	pipe := cr.client.Pipeline()
-	resolve := cr.stageGetMany(ctx, pipe, randIds)
+	resolve := cr.stageGetManyReport(ctx, pipe, randIds)
 
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return nil, err
+		return nil, nil, err
 	}
 
 	return resolve()
@@ -253,8 +255,19 @@ func (cr *Base[T]) getManyRaw(ctx context.Context, randIds []string) (map[string
 // rather than MGET keeps this correct on Redis Cluster, where the keys may live in
 // different slots.
 func (cr *Base[T]) stageGetMany(ctx context.Context, pipe redis.Pipeliner, randIds []string) func() (map[string]T, error) {
+	resolve := cr.stageGetManyReport(ctx, pipe, randIds)
+	return func() (map[string]T, error) {
+		items, _, err := resolve()
+		return items, err
+	}
+}
+
+// stageGetManyReport is stageGetMany whose resolver also returns the randIds whose value is
+// another generation's (nil when there is none).
+func (cr *Base[T]) stageGetManyReport(ctx context.Context, pipe redis.Pipeliner, randIds []string) func() (map[string]T, map[string]bool, error) {
 	commands := make(map[string]*redis.StringCmd, len(randIds))
 	var keyErr error
+	gen := cr.gen.load()
 
 	for _, randId := range randIds {
 		if _, staged := commands[randId]; staged {
@@ -272,12 +285,13 @@ func (cr *Base[T]) stageGetMany(ctx context.Context, pipe redis.Pipeliner, randI
 		}
 	}
 
-	return func() (map[string]T, error) {
+	return func() (map[string]T, map[string]bool, error) {
 		if keyErr != nil {
-			return nil, keyErr
+			return nil, nil, keyErr
 		}
 
 		items := make(map[string]T, len(commands))
+		var foreign map[string]bool
 
 		for randId, command := range commands {
 			value, err := command.Result()
@@ -285,21 +299,26 @@ func (cr *Base[T]) stageGetMany(ctx context.Context, pipe redis.Pipeliner, randI
 				if errors.Is(err, redis.Nil) {
 					continue
 				}
-				return nil, err
+				return nil, nil, err
 			}
 
-			fetchedItem, own, errUnmarshal := cr.decodeValue(value)
+			fetchedItem, own, errUnmarshal := decodeValue[T](value, gen)
 			if errUnmarshal != nil {
-				return nil, errUnmarshal
+				return nil, nil, errUnmarshal
 			}
 			if !own {
-				continue // another generation's value: not there, for this Base
+				// Another generation's value: not there, for this Base.
+				if foreign == nil {
+					foreign = map[string]bool{}
+				}
+				foreign[randId] = true
+				continue
 			}
 
 			items[randId] = fetchedItem
 		}
 
-		return items, nil
+		return items, foreign, nil
 	}
 }
 
@@ -322,7 +341,7 @@ func (cr *Base[T]) set(ctx context.Context, pipe redis.Pipeliner, item T, keyPar
 		return errKey
 	}
 
-	valueAsString, errorMarshalJson := cr.encodeValue(item)
+	valueAsString, errorMarshalJson := encodeValue(item, cr.gen.load())
 	if errorMarshalJson != nil {
 		return errorMarshalJson
 	}
@@ -355,19 +374,20 @@ func (cr *Base[T]) setIfAbsent(ctx context.Context, pipe redis.Pipeliner, item T
 		return errKey
 	}
 
-	valueAsString, errorMarshalJson := cr.encodeValue(item)
+	gen := cr.gen.load()
+	valueAsString, errorMarshalJson := encodeValue(item, gen)
 	if errorMarshalJson != nil {
 		return errorMarshalJson
 	}
 
-	if cr.generation != "" {
+	if gen.generation != "" {
 		// A value of another generation is not "present" for this Base: it is replaced, in
 		// the same command as the check, rather than left for the index to point at.
 		var cmd redis.Scripter = cr.client
 		if pipe != nil {
 			cmd = pipe
 		}
-		result := baseSetIfAbsentScript.Eval(ctx, cmd, []string{key}, valueAsString, cr.prefix, ttlMillis(cr.timeToLive))
+		result := baseSetIfAbsentScript.Eval(ctx, cmd, []string{key}, valueAsString, gen.prefix, ttlMillis(cr.timeToLive))
 		if pipe == nil && result.Err() != nil {
 			return result.Err()
 		}
@@ -497,8 +517,8 @@ func (cr *Base[T]) Exists(ctx context.Context, keyParams ...string) (bool, error
 		return false, errKey
 	}
 
-	if cr.generation != "" {
-		own, err := baseOwnsScript.Eval(ctx, cr.client, []string{key}, cr.prefix).Int64()
+	if gen := cr.gen.load(); gen.generation != "" {
+		own, err := baseOwnsScript.Eval(ctx, cr.client, []string{key}, gen.prefix).Int64()
 		if err != nil {
 			return false, err
 		}

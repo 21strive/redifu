@@ -371,7 +371,8 @@ timeline.SetGeneration(buildCommit)    // an index seeded by another build is dr
 
 Two builds of different generations can share one Redis during a rolling deploy without
 reading each other's values or indexes. Seed an index with a generation in one `MULTI/EXEC`
-(`TxPipeline`). Details: `CLAUDE.consumer.md` ("Generations") and `MIGRATION.md` §24.
+(`TxPipeline`), top a Timeline up with `Extend`, and seed again when a `Sorted` or `Page` read
+answers `ErrNotSeeded`. Details: `CLAUDE.consumer.md` ("Generations") and `MIGRATION.md` §24.
 
 ## Limitations
 

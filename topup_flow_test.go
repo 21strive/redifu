@@ -127,13 +127,27 @@ func (s *feedStore) perPage() int64 {
 }
 
 // seed is the documented seeder: up to limit rows that follow after (the head of the
-// table for the zero Cursor), with the markers that record whether they reach the end.
+// table for the zero Cursor), with the markers that record whether they reach the end. A
+// top-up (after is the index's tail) is an Extend: it applies only if the index still ends
+// there, and the read that asked for it reads again either way.
 func (s *feedStore) seed(ctx context.Context, after Cursor, limit int64) error {
 	rows := s.table.after(s.t, s.timeline, after, limit)
 
 	pipe := s.client.Pipeline()
 	if s.tx {
 		pipe = s.client.TxPipeline()
+	}
+	if !after.IsZero() {
+		for _, row := range rows {
+			if err := s.base.WithPipeline(pipe).Set(ctx, row); err != nil {
+				return err
+			}
+		}
+		if _, err := s.timeline.Extend(ctx, pipe, after, rows, int64(len(rows)) < limit, s.user); err != nil {
+			return err
+		}
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 	if after.IsZero() {
 		// A head seed starts the index over: a :lastpage marker can outlive the index
@@ -557,7 +571,7 @@ func TestDocumentedTimelineFlowIgnoresAStaleLastPageMarker(t *testing.T) {
 	}
 
 	// An hour later the client scrolls to the end; the top-up that reaches it sets the
-	// :lastpage marker, with a TTL of its own.
+	// :lastpage marker. Extend renews the index's TTL with it, so the two now expire together.
 	server.FastForward(time.Hour)
 	cursor := first.next
 	for {
@@ -571,9 +585,15 @@ func TestDocumentedTimelineFlowIgnoresAStaleLastPageMarker(t *testing.T) {
 		cursor = page.next
 	}
 
-	// The index expires; the marker, set an hour later, has not yet.
+	// The index goes without its marker — evicted, or a top-up of a seeder that does not renew
+	// the index — while the marker stays.
 	server.FastForward(indexTTL - 30*time.Minute)
 	marker := indexKey("feed:u1") + markerLastPage
+	if !server.Exists(indexKey("feed:u1")) || !server.Exists(marker) {
+		t.Fatalf("setup: the extension must keep the index alive with its marker: index %v, marker %v",
+			server.Exists(indexKey("feed:u1")), server.Exists(marker))
+	}
+	server.Del(indexKey("feed:u1"))
 	if server.Exists(indexKey("feed:u1")) || !server.Exists(marker) {
 		t.Fatalf("setup: index exists = %v, marker exists = %v; want the index gone and the marker alive",
 			server.Exists(indexKey("feed:u1")), server.Exists(marker))
