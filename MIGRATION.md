@@ -502,6 +502,40 @@ TTL, so a top-up's `:lastpage` marker no longer outlives the index it describes.
 `Base.MarkAsMissing` / `IsMissing` (`<key>:blank`) carry no generation: "the database has no such
 row" does not depend on the build that looked.
 
+## 25. The outbox package
+
+An addition; nothing changes for code that does not import `github.com/21strive/redifu/outbox`.
+The module now requires `github.com/jmoiron/sqlx`, which only a program that imports the outbox
+builds, and `github.com/lib/pq` for its tests.
+
+`outbox` keeps redifu collections in step with PostgreSQL through a change queue the database fills
+itself: a row trigger queues every change in the transaction of the write, and the store applies
+the queue to Redis per owner, before the owner's next read and in a background drain. A new
+adopter installs `outbox.Schema` with its migrations, watches its tables with `redifu_watch`,
+registers a handler per table and runs `RunDrainLoop` — readme ("Outbox"), `CLAUDE.consumer.md`
+("Outbox — keep Redis in step with PostgreSQL") and `examples/outbox/`.
+
+The package was taken over from an application that ran it as its own code. An application on such
+a copy moves onto the package without a migration and without a cold cache:
+
+- The schema is the same, byte for byte. An installation that has it needs nothing more;
+  `outbox.Schema` installs exactly it anywhere else.
+- The SQL, the advisory locks and their timeouts, the isolation, the lease's keys and value, the
+  scripts and the numbers are those of the copy, so a build on the package and a build on the copy
+  run side by side during the deploy that switches them (`TestWireContract` pins all of it). Log
+  and error texts are unchanged; error texts keep their `redifucache:` prefix.
+- What the copy took from the application comes in as chained calls on `NewStore`, before the
+  first cache is built: `WithBuild(revision, builtUnix)` — the same generation and order as before;
+  `""` or a negative order falls back to the binary's fingerprint or modification time, each logged
+  once, as before — then `WithLogger(logger)` (default `slog.Default()`), `WithRecover(fn)` with
+  `fn` of the shape `func(loop string, pass func()) bool` (default: recover the panic of a drain
+  pass and log it with its stack), and `WithLegacyFormats(version, raw...)` for the key formats
+  from before generations that `Purge` also deletes.
+- The entity codec, the fingerprint of a row entity's type and SQL, and the entities' Base TTL stay
+  in the application: `NewBase` takes the generation as an argument, as before. `ListTTL` (one
+  hour) is the package's; keep every Base under a list longer.
+- New: `ChangeKeys(changes)` gives a handler each key once, with its first change.
+
 ---
 
 ## Checklist
@@ -522,3 +556,5 @@ row" does not depend on the build that looked.
 10. Optional: give every `Base` and index a generation (section 24) instead of versioning key
     names, seed through `TxPipeline` once you do, handle `ErrNotSeeded` from `Sorted` and `Page`
     reads, and top a Timeline up with `Extend`.
+11. Optional: when more than one code path writes your PostgreSQL tables, let the database queue the
+    changes and the `outbox` package apply them (section 25); the write path then writes SQL only.

@@ -7,6 +7,12 @@ import (
 	"github.com/21strive/redifu"
 )
 
+// These writes keep Redis in step by hand, each next to the database write its caller makes. When
+// the same rows are also written elsewhere — a worker, another service, a backfill in psql — or a
+// database write can roll back after Redis took it, let the database queue the changes instead:
+// with the outbox package the write path writes the database only, and the outbox applies every
+// change to Redis. examples/outbox shows it end to end.
+
 // CreatePost writes the post and puts it into one feed.
 //
 // AddItem stores the post if Base does not hold it yet and always refreshes its TTL,

@@ -25,6 +25,8 @@ SortedSet[T]          low-level: ZAdd, ZRange, ZRem, ZCard — not used directly
 
 `Base[T]` stands alone, used by all structures above as the individual item store.
 
+The `outbox` package sits on top of them and keeps them in step with PostgreSQL (see Outbox).
+
 ---
 
 ## Entity identity — `Record`
@@ -373,8 +375,9 @@ leave a gap no later read fills.
 
 ## Seeding
 
-Redifu does not read from SQL. Populating Redis from a database is the consumer's job — they
-write plain SQL and a plain scan loop, then feed the results in through the primitives below.
+The redifu package does not read from SQL. Populating Redis from a database is the consumer's
+job — they write plain SQL and a plain scan loop, then feed the results in through the primitives
+below. (The `outbox` package, below, is a consumer of these primitives that the module ships.)
 
 Built-in seeders and the SQL `Builder` were removed: they could not express views, CTEs,
 subqueries or `WHERE IN`, and the scanner indirection they required cost more than the SQL it
@@ -412,6 +415,92 @@ original flow, whose handler seeded the first page only.
 
 ---
 
+## Outbox (`outbox/`)
+
+The one package of the module that talks to a database. It keeps redifu collections in step with
+PostgreSQL whatever writes to it — a request, a worker, a webhook, a backfill in psql — and it is a
+package of its own so that a program using redifu alone never builds sqlx. It was taken over from
+an application where it already ran; a build of that application and a build on this package share
+one database, one queue and one Redis during a rolling deploy, which is what the wire contract
+below is for.
+
+```
+any write ──► row trigger redifu_capture ──► one redifu_outbox row, in the transaction of the write
+a read    ──► Store.Serve(owner) ──► DrainOwner: owner lock, DELETE … RETURNING ≤ 500 rows, handlers,
+              one MULTI/EXEC behind the lease fence, COMMIT — or "no", and the read goes to SQL
+every process ──► RunDrainLoop ──► DrainAll: the owners with queued changes, 200 a round
+a cold index  ──► Store.Seed(owner): owner lock, refused while the owner has queued changes,
+                  load and fill in one MULTI/EXEC
+```
+
+- **Owner.** Every queued row names an owner (`owner_uuid`, `''` for global data; `redifu_watch`
+  reads it from a column or from the parent row). Drains and seeds of one owner take that owner's
+  advisory lock, so they never interleave. A view across owners is seeded with `SeedView` under
+  its own name's lock, which its drains take with `Batch.LockGlobal`.
+- **One snapshot.** Seeds and drain batches run REPEATABLE READ: Redis is written as the database
+  stood at the lock, and every write committed after it is still queued, with an old row equal to
+  what Redis holds. Handlers move entities between indexes from that old row (`ChangeKeys`). A
+  serialization failure (40001) of a drain is a drain that lost the race: the queue is left to
+  the next one.
+- **One MULTI/EXEC per seed and per drain batch.** A seed writes through a `TxPipeline`; a drain
+  records its handlers' writes (`fence.go`: a client that never dials) and sends them in one
+  MULTI/EXEC that WATCHes `{redifu:lease}:build`, on one connection held for that round trip
+  alone. The fence is single-node: a Redis Cluster would answer MOVED.
+- **Serve before a read.** `Serve`, `ServeOwner` and `ServeMany` apply the owner's queue or answer
+  no. A read scope (`NewReadScope`) applies an owner's queue once per call. Every reader (`List`,
+  `Detail`, `Buckets`, `Feed`) answers `ok == false` whenever the cache cannot answer.
+- **Escape hatches.** A Redis error pauses cached reads; an owner whose drain failed backs off; no
+  connection of the primary's pool within a second sends the read to SQL; a table without the
+  capture trigger is never served (`Watches`, re-read every minute); a store with `reads` off
+  still drains.
+- **Generations and the lease.** Every Base and index is built through `NewBase`, `NewSorted` and
+  `NewTimeline`, which set its generation (a row entity's shape for a Base, the build for an
+  index) and register its key format (`Formats`, read by `Purge`). The lease (`lease.go`) lets one
+  build use the cache at a time — the newest with a process alive; every other build reads SQL
+  and leaves the queue alone. Every generation carries the lease's epoch, so a takeover that is
+  not an upgrade turns the whole cache cold.
+- **The build** comes from `WithBuild(generation, order)`, settled on first use (`settleBuild`): a
+  generation `""` falls back to a fingerprint of the binary, a negative order to its modification
+  time, each logged once.
+
+### Wire contract
+
+`TestWireContract` pins these as literals. Changing any of them changes what every build sharing
+the database and Redis must agree on, and needs all of them at once:
+
+1. **Schema** (`schema.sql`): the table `redifu_outbox`, the index `redifu_outbox_owner_id`, the
+   functions `redifu_owner_of`, `redifu_capture`, `redifu_watch` and `redifu_unwatch_all`, and the
+   trigger name `redifu_capture`. It is byte for byte what existing installations run, so never
+   edit it in place: a change is a migration every installation must run.
+2. **Locks.** The owner lock is `pg_try_advisory_xact_lock(hashtextextended('redifu:' || $1, 0))`,
+   setting `statement_timeout` 15 s and `idle_in_transaction_session_timeout` 30 s in the same
+   statement (`redifuLockSQL`). `LockGlobal` takes `pg_advisory_xact_lock` on the same key, after
+   `SET LOCAL lock_timeout = '5s'`.
+3. **Numbers.** REPEATABLE READ; 500 rows per drain batch; 200 owners per round; 5 s drain backoff;
+   5 s Redis pause; 1 s connection wait; the watched tables re-read every minute; the backlog
+   checked once a minute and logged past a minute.
+4. **Lease.** `{redifu:lease}:build` holds `<build time>|<generation>|<epoch>`,
+   `{redifu:lease}:alive` lives 30 s past the last check of the holder's processes, a process
+   trusts its check for 250 ms, and a takeover follows `leaseClaimScript`.
+5. **Texts.** Log messages (`redifu: drain failed`, `redifu: pending check failed`, …) and error
+   texts (`redifucache: …`) stay as they are: log filters match them.
+6. **Redis.** Key layout, hash tags, markers, scripts and generation stamps are the root
+   package's; the outbox adds no key but the lease's.
+
+### Rules for changes here
+
+- No database driver in non-test code: an SQLSTATE is read through `interface{ SQLState() string }`
+  and a `text[]` parameter goes through `textArray`. lib/pq is a test dependency only.
+- Every SQL statement lives in `schema.sql` or `store.go`.
+- A handler, like every function that receives a pipeline, only enqueues; the store executes.
+- What depends on the application comes in through the `With…` options (build, logger, recover,
+  legacy purge formats) — never as an import, and never as a name of the application in code,
+  comments, examples or commit messages.
+- Tests that need PostgreSQL skip without `REDIFU_TEST_DSN`, install `Schema` themselves
+  (`installSchema`, serialised by an advisory lock) and use miniredis.
+
+---
+
 ## Invariants to preserve
 
 1. **Collections never delete `Base` keys.** `RemoveItem` only removes a member from one index; `Purge` only drops the index and its markers. Deleting the entity itself is `Base.Del`, and it is deliberate: any other index still holding that randId will come back short until it is re-seeded or purged. Prefer a leak that expires on its own over a hole that does not.
@@ -433,4 +522,4 @@ original flow, whose handler seeded the first page only.
 - A function that receives a pipeline must not issue reads of its own either. If it needs to read state before it writes, that belongs in a Lua script enqueued into the same pipeline.
 - Every new key goes through `keyBuilder`; every derived parameter list goes through `appendParams`.
 - A new index operation handles the generation: a read goes through `SortedSet.guarded`, a seed write through `stamp`, any other write through a script behind `generationGuard`; a new marker joins `SortedSet.markers` so the guard drops it too. Add its scenario to `generation_test.go` and `TestRealRedis`.
-- Do not reintroduce SQL into this package. Anything that needs a database belongs in the consumer, driven by the seeding primitives above.
+- Do not reintroduce SQL into the root package. Anything that needs a database belongs in the consumer, driven by the seeding primitives above — or in `outbox`, the one package that talks to PostgreSQL (see its rules above).
