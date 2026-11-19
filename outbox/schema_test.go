@@ -5,11 +5,48 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 )
+
+// schemaInstallLock serialises the installs of Schema into one test database: the packages under
+// test run at once, and two CREATE OR REPLACE FUNCTION of one function at the same time fail.
+const schemaInstallLock = 7_204_031_985_517_303_301
+
+var (
+	schemaInstallOnce sync.Once
+	schemaInstallErr  error
+)
+
+// installSchema installs Schema into the test database, once per test binary, as an application's
+// migration does: the fixtures need the outbox, and a database made with createdb has none.
+func installSchema(t *testing.T, db *sqlx.DB) {
+	t.Helper()
+	schemaInstallOnce.Do(func() {
+		tx, err := db.Beginx()
+		if err != nil {
+			schemaInstallErr = err
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, int64(schemaInstallLock)); err != nil {
+			schemaInstallErr = err
+			return
+		}
+		if _, err := tx.Exec(Schema); err != nil {
+			schemaInstallErr = err
+			return
+		}
+		schemaInstallErr = tx.Commit()
+	})
+	if schemaInstallErr != nil {
+		t.Fatalf("install Schema: %v", schemaInstallErr)
+	}
+}
 
 // The schema is the outbox and nothing of an application: no transaction of its own, no setting,
 // no watched table.
