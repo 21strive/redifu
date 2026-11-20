@@ -1284,6 +1284,23 @@ as an empty result.
 `outbox.NewReadScope(ctx)` makes one call (an HTTP handler) check each owner's queue once however
 many readers it uses; never keep a scope past the call it was opened for.
 
+### Related entities
+
+A relation resolves from `Base` as it does anywhere else; the outbox only keeps every `Base`
+current. Watch the related entity's table and let a handler `Set` (or `Del`) each changed row.
+Nothing else moves — no index holds the entity — and every item that points at it resolves the new
+value on its next read. Two things differ from a hand-written seeder that joins:
+
+- **A reader seeds its own entity, never the ones it relates to.** A `Feed`, `List` or `Buckets`
+  seed writes its members into their `Base` and nothing else. Read the related entities through an
+  `outbox.Detail` before the list: it loads the ones Redis lacks.
+- **A related entity may have another owner.** `Serve` applies one owner's queue. Reading the
+  related entities through their `Detail`, in the same read scope, applies their owners' queues as
+  well, so a rename committed before the call is in the answer.
+
+`examples/outboxfeed/` does both: a post is its author's, an account is its own owner, and an
+organisation is everyone's (`''`).
+
 ### Rules
 
 - **The write path writes to PostgreSQL and nothing else.** No `Base.Set`, no `AddItem`, no
@@ -1305,7 +1322,8 @@ many readers it uses; never keep a scope past the call it was opened for.
   (`WithLegacyFormats` adds the formats from before generations).
 
 `examples/outbox/` is all of the above for a `posts` table, with a test that runs it against a
-real database.
+real database. `examples/outboxfeed/` is `examples/feed` on the outbox: three related entities and an
+author's feed paged by cursor.
 
 ## Project conventions
 

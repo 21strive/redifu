@@ -428,7 +428,8 @@ Two rules:
 
 The package is PostgreSQL only and imports no database driver: it works through sqlx with the one
 your application registers. [`examples/outbox/`](examples/outbox/) is the four steps end to end,
-tested against a real database; `CLAUDE.consumer.md` ("Outbox") is the adoption guide.
+tested against a real database, and [`examples/outboxfeed/`](examples/outboxfeed/) the same with
+related entities and a cursor-paged feed; `CLAUDE.consumer.md` ("Outbox") is the adoption guide.
 
 ## Limitations
 
@@ -465,6 +466,12 @@ It is part of `go build ./...` and has its own tests, so it cannot drift away fr
 watched by the database, a handler that applies its changes, an author's list that a read serves
 with every committed write in it, and a write path that is SQL alone. Its test runs the whole
 adoption against `REDIFU_TEST_DSN`.
+
+[`examples/outboxfeed/`](examples/outboxfeed/) is `examples/feed` on the outbox: the same post,
+author and organisation related through `Base`, an author's feed paged by cursor (`outbox.Feed`),
+the author and the organisation read through `outbox.Detail`, and a write path that is SQL alone.
+Its test walks every feed page by page after each kind of write, and checks each page and its
+cursor against the database's answer.
 
 ## Upgrading
 

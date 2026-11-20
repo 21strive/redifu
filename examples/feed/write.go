@@ -11,7 +11,7 @@ import (
 // the same rows are also written elsewhere — a worker, another service, a backfill in psql — or a
 // database write can roll back after Redis took it, let the database queue the changes instead:
 // with the outbox package the write path writes the database only, and the outbox applies every
-// change to Redis. examples/outbox shows it end to end.
+// change to Redis. examples/outboxfeed is this example on the outbox.
 
 // CreatePost writes the post and puts it into one feed.
 //

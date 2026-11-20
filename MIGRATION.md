@@ -513,7 +513,7 @@ itself: a row trigger queues every change in the transaction of the write, and t
 the queue to Redis per owner, before the owner's next read and in a background drain. A new
 adopter installs `outbox.Schema` with its migrations, watches its tables with `redifu_watch`,
 registers a handler per table and runs `RunDrainLoop` — readme ("Outbox"), `CLAUDE.consumer.md`
-("Outbox — keep Redis in step with PostgreSQL") and `examples/outbox/`.
+("Outbox — keep Redis in step with PostgreSQL"), `examples/outbox/` and `examples/outboxfeed/`.
 
 The package was taken over from an application that ran it as its own code. An application on such
 a copy moves onto the package without a migration and without a cold cache:
