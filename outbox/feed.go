@@ -15,12 +15,15 @@ import (
 // a page runs past it, until the database says there is no more (lastpage). A cursor is a position
 // (score, member), so a client keeps its place when the item it stopped at leaves the feed.
 //
-// The order is the Timeline's: Descending = score descending, then member (uuid) descending by bytes.
-// load must return rows in exactly that order with the same keyset, e.g. for a feed scored by
-// created_at in microseconds (exact in a float64 until 2255):
+// The order is the Timeline's: Descending = score descending, then member descending by bytes. The
+// member is the item's randId (GetRandId), so load must return rows in exactly that order with the
+// keyset on the column that holds the randId, e.g. for a feed scored by created_at in microseconds
+// (exact in a float64 until 2255):
 //
-//	WHERE (floor(extract(epoch FROM created_at) * 1000000)::bigint, uuid COLLATE "C") < ($score, $member)
-//	ORDER BY 1 DESC, uuid COLLATE "C" DESC LIMIT $limit
+//	WHERE (floor(extract(epoch FROM created_at) * 1000000)::bigint, randid COLLATE "C") < ($score, $member)
+//	ORDER BY floor(extract(epoch FROM created_at) * 1000000)::bigint DESC, randid COLLATE "C" DESC LIMIT $limit
+//
+// examples/outboxfeed is a feed built this way.
 type Feed[E Scored] struct {
 	store    *Store
 	base     *redifu.Base[E]

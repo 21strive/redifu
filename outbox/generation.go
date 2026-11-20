@@ -13,7 +13,7 @@ import (
 	"github.com/21strive/redifu"
 )
 
-// Generations. A key names its data and nothing else — post:<uuid>, {post:list:<owner>} — and
+// Generations. A key names its data and nothing else — post:<randid>, {post:list:<owner>} — and
 // redifu keeps which build wrote a value or seeded an index in the stored state, comparing it on
 // every read and write (redifu SetGeneration). Two builds sharing one Redis, as during a rolling
 // deploy, never read each other's state: what one wrote is a miss for the other, which reloads it

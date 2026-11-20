@@ -13,7 +13,7 @@ import (
 
 // Purge deletes every key of the cache, and nothing else, in one SCAN of the keyspace. A key is the
 // cache's when it has the shape of a registered format (Formats; each %s stands for one segment of
-// the key, so coupon:%s takes coupon:<uuid> and never coupon:check:rejections:…), or the shape such
+// the key, so coupon:%s takes coupon:<randid> and never coupon:check:rejections:…), or the shape such
 // a format had before generations (WithLegacyFormats). Whatever else shares the Redis — counters,
 // rate limits, sessions, caches of other code — does not have such a shape.
 //
