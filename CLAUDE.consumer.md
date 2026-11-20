@@ -16,6 +16,10 @@ Whenever adding a new entity, endpoint, or caching layer — use redifu. Do not 
 | `redifu.Page[T]` | Numbered page pagination |
 | `redifu.TimeSeries[T]` | Query data by time range |
 
+When the data lives in PostgreSQL and more than one code path writes it, build these through the
+`outbox` package instead of writing Redis by hand: the database queues every change and the
+outbox applies it (see "Outbox — keep Redis in step with PostgreSQL" below).
+
 ### How the structures relate
 
 `Base[T]` is the single source of truth for every item. **Every collection structure
@@ -1159,6 +1163,168 @@ postTimeline.SetGeneration(buildCommit)
 
 A generation is at most 128 bytes without control characters.
 
+## Outbox — keep Redis in step with PostgreSQL
+
+Writing Redis next to every database write works while one code path writes each table. Once a
+worker, a webhook, another service or a backfill writes the same rows — or a transaction rolls
+back after Redis took its write — the cache drifts. `github.com/21strive/redifu/outbox` moves the
+bookkeeping into the database: a row trigger queues every change in the transaction of the write,
+and the store applies the queue to Redis per owner. Reads apply their owner's queue first, so a
+read sees every write that committed before it started.
+
+### The four steps
+
+```go
+// 1. Migration: install the outbox (the same script for every application, safe to run again).
+db.MustExec(outbox.Schema)
+
+// 2. Migration: watch every cached table — its key column and its owner.
+db.MustExec(`SELECT redifu_watch('posts', 'randid', 'author_uuid')`)
+
+// 3. Startup: the store, the caches on it, the handlers.
+store := outbox.NewStore(db, rdb, true).
+    WithBuild(gitSHA, buildUnix).
+    WithLogger(logger)
+posts, err := outbox.NewBase[*Post](store, "post:%s", 2*time.Hour, postGeneration)
+if err != nil {
+    return nil, err
+}
+byAuthor, err := outbox.NewList[*Post](store, posts, "post:author:%s", redifu.Descending, []string{"posts"},
+    func(ctx context.Context, tx *sqlx.Tx, params []string) ([]*Post, error) {
+        return loadPosts(ctx, tx, `WHERE author_uuid = $1`, params[0]) // every post, scored
+    },
+    func(params []string) string { return params[0] }, // whose lock and queue cover the list
+)
+if err != nil {
+    return nil, err
+}
+store.Register(postHandler{posts: posts, byAuthor: byAuthor})
+
+// 4. Startup: drain in the background, in every process.
+go store.RunDrainLoop(ctx, time.Second)
+```
+
+The owner spec of `redifu_watch` is a column of the row (`'author_uuid'`), `''` for a table every
+owner shares, or `'parent:<table>:<fk>:<owner column>'` for a child row whose owner is its
+parent's — the parent is looked up by its `uuid` column. A table watched later turns its cache on
+without a restart: the store re-reads the watched tables every minute, and never serves a table
+that has no trigger.
+
+### The handler
+
+```go
+type postHandler struct {
+    posts    *redifu.Base[*Post]
+    byAuthor *outbox.List[*Post]
+}
+
+func (h postHandler) Tables() []string { return []string{"posts"} }
+
+func (h postHandler) Apply(batch *outbox.Batch, table string, changes []outbox.Change) error {
+    keys, first := outbox.ChangeKeys(changes) // each key once, with its first change
+    current, err := loadPosts(batch.Ctx, batch.Tx, `WHERE randid = ANY($1)`, pq.Array(keys))
+    if err != nil {
+        return err
+    }
+    byKey := make(map[string]*Post, len(current))
+    for _, post := range current {
+        byKey[post.RandId] = post
+    }
+    for _, key := range keys {
+        old, post := first[key].Old(), byKey[key] // old: the row as Redis holds it
+        stub := &Post{Record: &redifu.Record{RandId: key}}
+        if old != nil && (post == nil || old.Str("author_uuid") != post.AuthorUUID) {
+            if err := h.byAuthor.Remove(batch.Ctx, batch.Pipe, stub, old.Str("author_uuid")); err != nil {
+                return err
+            }
+        }
+        if post == nil { // deleted
+            if err := h.posts.WithPipeline(batch.Pipe).Del(batch.Ctx, stub); err != nil {
+                return err
+            }
+            continue
+        }
+        if err := h.posts.WithPipeline(batch.Pipe).Set(batch.Ctx, post); err != nil {
+            return err
+        }
+        if err := h.byAuthor.Add(batch.Ctx, batch.Pipe, post, post.AuthorUUID); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+```
+
+- **Reload, never trust the queue's copy.** A change carries the row *before* it (`Old()`, nil for
+  an INSERT) and the key; the current row comes from `batch.Tx`, which reads the snapshot of the
+  drain under the owner's lock. Compare the two to know which indexes the entity leaves and enters.
+- **Enqueue only.** Write into `batch.Pipe` and return; the store sends the whole batch in one
+  MULTI/EXEC. Never `Exec` it — and do not decide from a Redis read: until that EXEC Redis does not
+  hold the batch's writes, so the database (`batch.Tx`) is what a handler reads.
+- Work that depends on several tables of one batch goes through `batch.Later(key, fn)` (once per
+  key, after every table); a value gathered across tables through `batch.Local`; a step that must
+  follow the batch's Redis writes (a `Purge`, which runs its own pipeline) through
+  `batch.AfterExec`.
+- A view across owners (every owner's rows in one index) is seeded with
+  `store.SeedView(ctx, name, tables, fn)` and its handler takes `batch.LockGlobal(name)` first.
+
+### Reading
+
+Every reader answers `ok == false` when it cannot answer now — reads off, Redis down, the owner's
+lock busy, a table not watched, another build holding the cache. Read SQL then, and never treat it
+as an empty result.
+
+| Reader | What it serves |
+|--------|----------------|
+| `outbox.List` | a whole list per params in one `Sorted`: `Read`, `ReadPage(start, stop)`, `Count` |
+| `outbox.Feed` | a cursor-paged `Timeline`, extended from its tail: `Read`, `ReadN(n)` |
+| `outbox.Buckets` | a time range kept as one `Sorted` per owner and UTC month: `Read`, `CountBetween` |
+| `outbox.Detail` | entities by key, loaded under their owner's lock when Redis lacks them: `Get` |
+
+`outbox.NewReadScope(ctx)` makes one call (an HTTP handler) check each owner's queue once however
+many readers it uses; never keep a scope past the call it was opened for.
+
+### Related entities
+
+A relation resolves from `Base` as it does anywhere else; the outbox only keeps every `Base`
+current. Watch the related entity's table and let a handler `Set` (or `Del`) each changed row.
+Nothing else moves — no index holds the entity — and every item that points at it resolves the new
+value on its next read. Two things differ from a hand-written seeder that joins:
+
+- **A reader seeds its own entity, never the ones it relates to.** A `Feed`, `List` or `Buckets`
+  seed writes its members into their `Base` and nothing else. Read the related entities through an
+  `outbox.Detail` before the list: it loads the ones Redis lacks.
+- **A related entity may have another owner.** `Serve` applies one owner's queue. Reading the
+  related entities through their `Detail`, in the same read scope, applies their owners' queues as
+  well, so a rename committed before the call is in the answer.
+
+`examples/outboxfeed/` does both: a post is its author's, an account is its own owner, and an
+organisation is everyone's (`''`).
+
+### Rules
+
+- **The write path writes to PostgreSQL and nothing else.** No `Base.Set`, no `AddItem`, no
+  `Purge` after a write: the queue has the change already, and a write of your own to Redis races
+  the drain or outlives a rollback.
+- **One store per process, and `RunDrainLoop` in every process that writes**, so the queue stays
+  short when nobody reads. `store.Backlog` reports the queue's length and age for a health check.
+- **Build every Base and index through `outbox.NewBase`, `NewSorted`, `NewTimeline`** (or a reader
+  built on them). Give a row entity's Base a generation that changes with what one value holds
+  (its type and its SELECT); indexes take the build from `WithBuild`.
+- **Give the store the build** — `WithBuild(commit, buildUnix)` — so that during a rolling deploy
+  the newer build takes the cache over (the lease) and the older one reads SQL. A one-off command
+  run from a newer build calls `outbox.ObserveLease()` first, so it never takes the cache from
+  the processes that serve traffic.
+- **Base outlives its index:** a TTL longer than `outbox.ListTTL` for every Base under a list.
+- **Turning the cache off:** `SELECT redifu_unwatch_all();` (every capture trigger of the
+  database), empty `redifu_outbox`, and run `store.Purge` before turning it on again: Redis missed
+  every write in between. `Purge` deletes the keys of the registered formats and nothing else
+  (`WithLegacyFormats` adds the formats from before generations).
+
+`examples/outbox/` is all of the above for a `posts` table, with a test that runs it against a
+real database. `examples/outboxfeed/` is `examples/feed` on the outbox: three related entities and an
+author's feed paged by cursor.
+
 ## Project conventions
 
 - Individual item (`Base`) TTL: **7 days**
@@ -1202,3 +1368,7 @@ A generation is at most 128 bytes without control characters.
 - Do not seed an index that has a generation through a plain pipeline — use `TxPipeline`, so the seed's first write and the rest land together
 - Do not top a Timeline up with `IngestItem(seed = true)` — use `Extend`, which writes nothing into an index that no longer ends at the tail you read
 - Do not answer an empty list for `redifu.ErrNotSeeded` from a `Sorted` or `Page` read — seed and read again
+- Do not write Redis from a write path whose table the outbox watches — write the database only; the drain applies the change
+- Do not call `pipe.Exec` in an outbox handler, or decide from a Redis read there — reload through `batch.Tx`, enqueue into `batch.Pipe`
+- Do not treat `ok == false` from an outbox reader as an empty result — read SQL
+- Do not build a Base or index for the outbox with `redifu.New…` directly — use `outbox.NewBase`, `NewSorted`, `NewTimeline`, which give it its generation and register its key format

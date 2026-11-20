@@ -374,11 +374,70 @@ reading each other's values or indexes. Seed an index with a generation in one `
 (`TxPipeline`), top a Timeline up with `Extend`, and seed again when a `Sorted` or `Page` read
 answers `ErrNotSeeded`. Details: `CLAUDE.consumer.md` ("Generations") and `MIGRATION.md` §24.
 
+## Outbox — a cache that follows every write
+
+[`github.com/21strive/redifu/outbox`](outbox/) keeps the cache in step with a PostgreSQL
+database, whatever writes to it: a request, a worker, a webhook, a backfill in psql. The database
+records every change itself — a row trigger queues one `redifu_outbox` row in the transaction of
+the write — and the store applies the queue to Redis per owner, under that owner's advisory lock.
+A read applies its owner's queue first, or answers from SQL, so it sees every write that committed
+before it started; a seed takes the same lock and reads one snapshot, so it never interleaves with
+a drain. Redis is never the source of truth: any failure sends the read to SQL.
+
+Four steps for a backend, here a `posts` table owned by `author_uuid`:
+
+1. **Install the schema.** Run `outbox.Schema` through your migration tool: the `redifu_outbox`
+   table, its index, and the functions `redifu_owner_of`, `redifu_capture`, `redifu_watch` and
+   `redifu_unwatch_all`. Running it again changes nothing.
+2. **Watch each table.** `SELECT redifu_watch('posts', 'randid', 'author_uuid');` names the table,
+   its key column and its owner: a column of the row, `''` for global data, or
+   `parent:<table>:<fk>:<owner column>` to read the owner from the parent row (looked up by the
+   parent's `uuid` column).
+3. **Build the cache and its handler.** `outbox.NewBase`, `NewList`, `NewDetail`, `NewBuckets` or
+   `NewFeed` on the store, then `store.Register(handler)`. A handler reloads the changed rows
+   through `batch.Tx` and enqueues the Redis writes into `batch.Pipe`; `outbox.ChangeKeys(changes)`
+   gives it each key once, with the key's first change, whose `Old()` row is what Redis holds.
+4. **Run the store.** One store per process: `outbox.NewStore(db, rdb, reads)`, then
+   `go store.RunDrainLoop(ctx, time.Second)`. Read with `list.Read(ctx, params...)`; when it
+   answers `ok == false`, read SQL.
+
+```go
+type Handler interface {
+    Tables() []string
+    Apply(batch *outbox.Batch, table string, changes []outbox.Change) error
+}
+
+store := outbox.NewStore(db, rdb, true).
+    WithBuild(gitSHA, buildUnix). // default: a fingerprint of the binary and its modification time
+    WithLogger(logger).           // default: slog.Default()
+    WithRecover(recoverPass)      // default: recover a panicking drain pass and log it with its stack
+```
+
+Call every `With…` before the first cache is built on the store. The build matters during a
+rolling deploy: every Base and index carries a generation, and a lease in Redis lets one build at
+a time — the newest with a process alive — use the cache.
+
+Two rules:
+
+- **The write path writes to Postgres, and nothing else.** No `Set` or `AddItem` after it: the
+  queue already holds the change, and a write of your own to Redis would race the drain, or
+  outlive a rollback.
+- **Turning the cache off:** `SELECT redifu_unwatch_all();` (it detaches every capture trigger in
+  the database), empty `redifu_outbox`, and run `store.Purge` before turning the cache on again —
+  Redis missed every write in between.
+
+The package is PostgreSQL only and imports no database driver: it works through sqlx with the one
+your application registers. [`examples/outbox/`](examples/outbox/) is the four steps end to end,
+tested against a real database, and [`examples/outboxfeed/`](examples/outboxfeed/) the same with
+related entities and a cursor-paged feed; `CLAUDE.consumer.md` ("Outbox") is the adoption guide.
+
 ## Limitations
 
 - Sorting only supports fields of type `time.Time`, `*time.Time` or `int64`. An `int64` beyond
   2^53 is rejected rather than silently losing precision, so snowflake ids cannot be scores.
-- Seeding is yours to write — redifu has no SQL layer, no query builder and no database dependency.
+- Seeding is yours to write — the redifu package has no SQL layer, no query builder and no
+  database dependency. Only `outbox` talks to a database (PostgreSQL, through sqlx), and only a
+  program that imports it builds sqlx.
 - Relations nest up to `DefaultRelationDepth` (4) levels; beyond that, resolution stops rather
   than failing, so a self-referential relation terminates.
 - Reading an item extends its TTL with `GETEX`, which needs Redis 6.2. Call
@@ -403,12 +462,24 @@ It is part of `go build ./...` and has its own tests, so it cannot drift away fr
 | [`handler.go`](examples/feed/handler.go) | feed fetch and single-item read |
 | [`write.go`](examples/feed/write.go) | create, fan-out, update, delete |
 
+[`examples/outbox/`](examples/outbox/) is the same kind of consumer on the outbox: a `posts` table
+watched by the database, a handler that applies its changes, an author's list that a read serves
+with every committed write in it, and a write path that is SQL alone. Its test runs the whole
+adoption against `REDIFU_TEST_DSN`.
+
+[`examples/outboxfeed/`](examples/outboxfeed/) is `examples/feed` on the outbox: the same post,
+author and organisation related through `Base`, an author's feed paged by cursor (`outbox.Feed`),
+the author and the organisation read through `outbox.Detail`, and a write path that is SQL alone.
+Its test walks every feed page by page after each kind of write, and checks each page and its
+cursor against the database's answer.
+
 ## Upgrading
 
 Current release: see [`MIGRATION.md`](MIGRATION.md) — constructors return errors, relations move
 onto `Base` and nest, `json:"-"` is enforced, ingest is a single atomic script, and pagination no
 longer mistakes an expired item for the end of a feed. A Timeline is read by position cursor
-and grows by top-up from its tail (sections 15 and 16).
+and grows by top-up from its tail (sections 15 and 16). The outbox package is new and changes nothing
+for code that does not import it (section 25).
 
 ## Breaking changes on `redifu-simplified`
 
